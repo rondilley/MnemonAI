@@ -1,0 +1,190 @@
+/*
+ * Copyright (c) 2026, Ron Dilley
+ * All rights reserved.
+ *
+ * SPDX-License-Identifier: GPL-3.0-only
+ *
+ * config.h.in -- Autoconf-style configuration header template
+ *
+ * This file is processed by CMake's configure_file() to produce config.h.
+ * Do not edit config.h directly; edit config.h.in instead.
+ */
+
+#ifndef MNEMON_CONFIG_H
+#define MNEMON_CONFIG_H
+
+/* ------------------------------------------------------------------ */
+/* Package information                                                 */
+/* ------------------------------------------------------------------ */
+
+/* Package name */
+#define PACKAGE_NAME "@PROJECT_NAME@"
+
+/* Package version string */
+#define PACKAGE_VERSION "@PROJECT_VERSION@"
+
+/* Package version components */
+#define PACKAGE_VERSION_MAJOR @PROJECT_VERSION_MAJOR@
+#define PACKAGE_VERSION_MINOR @PROJECT_VERSION_MINOR@
+#define PACKAGE_VERSION_PATCH @PROJECT_VERSION_PATCH@
+
+/* Full package string */
+#define PACKAGE_STRING "@PROJECT_NAME@ @PROJECT_VERSION@"
+
+/* Bug report address */
+#define PACKAGE_BUGREPORT "@PACKAGE_BUGREPORT@"
+
+/* Package URL */
+#define PACKAGE_URL "@PACKAGE_URL@"
+
+/* Package tarname (lowercase, no spaces) */
+#define PACKAGE_TARNAME "@PACKAGE_TARNAME@"
+
+/* ------------------------------------------------------------------ */
+/* System headers                                                      */
+/* ------------------------------------------------------------------ */
+
+/* Define to 1 if you have <dlfcn.h> */
+#cmakedefine HAVE_DLFCN_H 1
+
+/* Define to 1 if you have <fcntl.h> */
+#cmakedefine HAVE_FCNTL_H 1
+
+/* Define to 1 if you have <getopt.h> */
+#cmakedefine HAVE_GETOPT_H 1
+
+/* Define to 1 if you have <inttypes.h> */
+#cmakedefine HAVE_INTTYPES_H 1
+
+/* Define to 1 if you have <memory.h> */
+#cmakedefine HAVE_MEMORY_H 1
+
+/* Define to 1 if you have <pthread.h> */
+#cmakedefine HAVE_PTHREAD_H 1
+
+/* Define to 1 if you have <signal.h> */
+#cmakedefine HAVE_SIGNAL_H 1
+
+/* Define to 1 if you have <stdint.h> */
+#cmakedefine HAVE_STDINT_H 1
+
+/* Define to 1 if you have <stdlib.h> */
+#cmakedefine HAVE_STDLIB_H 1
+
+/* Define to 1 if you have <string.h> */
+#cmakedefine HAVE_STRING_H 1
+
+/* Define to 1 if you have <strings.h> */
+#cmakedefine HAVE_STRINGS_H 1
+
+/* Define to 1 if you have <sys/mman.h> */
+#cmakedefine HAVE_SYS_MMAN_H 1
+
+/* Define to 1 if you have <sys/stat.h> */
+#cmakedefine HAVE_SYS_STAT_H 1
+
+/* Define to 1 if you have <sys/types.h> */
+#cmakedefine HAVE_SYS_TYPES_H 1
+
+/* Define to 1 if you have <sys/wait.h> */
+#cmakedefine HAVE_SYS_WAIT_H 1
+
+/* Define to 1 if you have <syslog.h> */
+#cmakedefine HAVE_SYSLOG_H 1
+
+/* Define to 1 if you have <unistd.h> */
+#cmakedefine HAVE_UNISTD_H 1
+
+/* Define to 1 if you have <errno.h> */
+#cmakedefine HAVE_ERRNO_H 1
+
+/* ------------------------------------------------------------------ */
+/* System functions                                                    */
+/* ------------------------------------------------------------------ */
+
+/* Define to 1 if you have the `clock_gettime' function */
+#cmakedefine HAVE_CLOCK_GETTIME 1
+
+/* Define to 1 if you have the `daemon' function */
+#cmakedefine HAVE_DAEMON 1
+
+/* Define to 1 if you have the `dlopen' function */
+#cmakedefine HAVE_DLOPEN 1
+
+/* Define to 1 if you have the `fork' function */
+#cmakedefine HAVE_FORK 1
+
+/* Define to 1 if you have the `getopt_long' function */
+#cmakedefine HAVE_GETOPT_LONG 1
+
+/* Define to 1 if you have the `mmap' function */
+#cmakedefine HAVE_MMAP 1
+
+/* Define to 1 if you have the `posix_memalign' function */
+#cmakedefine HAVE_POSIX_MEMALIGN 1
+
+/* Define to 1 if you have the `realpath' function */
+#cmakedefine HAVE_REALPATH 1
+
+/* Define to 1 if you have the `setsid' function */
+#cmakedefine HAVE_SETSID 1
+
+/* Define to 1 if you have the `strndup' function */
+#cmakedefine HAVE_STRNDUP 1
+
+/* Define to 1 if you have the `strerror_r' function */
+#cmakedefine HAVE_STRERROR_R 1
+
+/* ------------------------------------------------------------------ */
+/* Types and sizes                                                     */
+/* ------------------------------------------------------------------ */
+
+/* The size of `void *', as computed by sizeof */
+#define SIZEOF_VOID_P @CMAKE_SIZEOF_VOID_P@
+
+/* ------------------------------------------------------------------ */
+/* Optional dependencies                                               */
+/* ------------------------------------------------------------------ */
+
+/* Define to 1 if libcurl is available */
+#cmakedefine HAVE_LIBCURL 1
+
+/* Define to 1 if libsystemd is available */
+#cmakedefine HAVE_LIBSYSTEMD 1
+
+/* Define to 1 if libnuma is available */
+#cmakedefine HAVE_LIBNUMA 1
+
+/* ------------------------------------------------------------------ */
+/* SIMD / hardware features                                            */
+/* ------------------------------------------------------------------ */
+
+/* Define to 1 if the compiler supports AVX2 */
+#cmakedefine HAVE_AVX2 1
+
+/* Define to 1 if the compiler supports AVX-512F */
+#cmakedefine HAVE_AVX512 1
+
+/* ------------------------------------------------------------------ */
+/* Build configuration                                                 */
+/* ------------------------------------------------------------------ */
+
+/* Define to 1 if built with systemd support */
+#cmakedefine ENABLE_SYSTEMD 1
+
+/* Define to 1 if built with NUMA support */
+#cmakedefine ENABLE_NUMA 1
+
+/* Define to 1 if built with libcurl for entity extraction */
+#cmakedefine ENABLE_CURL 1
+
+/* Define to the installation prefix */
+#define PREFIX "@CMAKE_INSTALL_PREFIX@"
+
+/* Define to the sysconf directory */
+#define SYSCONFDIR "@MNEMON_SYSCONFDIR@"
+
+/* Define to the local state directory */
+#define LOCALSTATEDIR "@MNEMON_LOCALSTATEDIR@"
+
+#endif /* MNEMON_CONFIG_H */

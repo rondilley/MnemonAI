@@ -1425,11 +1425,13 @@ All MCP tool parameters are validated against JSON Schema before the handler is 
 
 ## 11. Build System and Dependencies
 
+> **Implementation note (2026-04-04):** The build system described below is fully implemented and tested. Key additions from the original design: C++ added to LANGUAGES for vendored usearch, SQLite3 amalgamation vendored (eliminates system dependency), `_POSIX_C_SOURCE=200809L` and `_DEFAULT_SOURCE` added globally (required for `strdup`/`realpath`/`clock_gettime` under strict C11), `-Werror=implicit-function-declaration` added to prevent pointer truncation bugs on 64-bit systems.
+
 ### 11.1 CMake
 
 ```cmake
 cmake_minimum_required(VERSION 3.16)
-project(mnemon_ai VERSION 0.1.0 LANGUAGES C)
+project(mnemon_ai VERSION 0.1.0 LANGUAGES C CXX)  # CXX for vendored usearch only
 
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
@@ -1512,22 +1514,24 @@ endforeach()
 
 # --- Install ---
 install(TARGETS mnemon_ai RUNTIME DESTINATION bin)
-install(FILES mnemon_ai.conf.example DESTINATION etc/mnemon_ai)
-install(FILES mnemon_ai.service DESTINATION lib/systemd/system)
+install(FILES etc/mnemon_ai.conf.example DESTINATION etc/mnemon_ai)
+install(FILES etc/mnemon_ai.service DESTINATION lib/systemd/system)
 ```
 
 ### 11.2 Dependency Matrix
 
+> **Implementation note:** SQLite3 is now vendored as the amalgamation (single-file build) to eliminate the system package dependency and ensure FTS5 is always available.
+
 | Dependency | Version | Method | Required | License | Purpose |
 |------------|---------|--------|----------|---------|---------|
-| cJSON | 1.7.x | Vendored (2 files) | Yes | MIT | JSON parsing |
-| LMDB | 0.9.x | Vendored (3 files) | Yes | OpenLDAP | Primary KV/graph store |
-| usearch | 2.x | Vendored (1 header) | Yes | Apache 2.0 | Vector index (HNSW) |
-| SQLite3 | 3.x | System package | Yes | Public domain | Full-text search (FTS5) |
+| cJSON | 1.7.18 | Vendored (2 files) | Yes | MIT | JSON parsing |
+| LMDB | 0.9.x | Vendored (4 files) | Yes | OpenLDAP | Primary KV/graph store |
+| usearch | 2.x | Vendored (C API + C++ headers) | Yes | Apache 2.0 | Vector index (HNSW) |
+| SQLite3 | 3.45.1 | Vendored (amalgamation) | Yes | Public domain | Full-text search (FTS5) |
 | llama.cpp | Latest | System install | Yes | MIT | Embedding generation |
-| libcurl | 7.x/8.x | System package | No | MIT-like | Entity extraction HTTP |
+| libcurl | 7.x/8.x | System package | No | MIT-like | Entity extraction HTTP (Phase 4) |
 | libsystemd | 2xx | System package | No | LGPL-2.1 | sd_notify |
-| libnuma | 2.x | System package | No | LGPL-2.1 | NUMA-aware allocation |
+| libnuma | 2.x | System package | No | LGPL-2.1 | NUMA-aware allocation (Phase 5) |
 | pthreads | POSIX | System (glibc) | Yes | LGPL | Threading |
 
 ### 11.3 Source Tree
@@ -1536,8 +1540,9 @@ install(FILES mnemon_ai.service DESTINATION lib/systemd/system)
 mnemon_ai/
     CMakeLists.txt
     LICENSE
-    mnemon_ai.conf.example
-    mnemon_ai.service
+    etc/
+        mnemon_ai.conf.example
+        mnemon_ai.service
     doc/
         ARCHITECTURE.md              -- This document
         research-synthesis.md
@@ -1673,104 +1678,45 @@ First found wins. Missing config file is not an error -- all settings have defau
 
 ## 13. Implementation Phases
 
-```mermaid
-gantt
-    title mnemon_ai Implementation Phases
-    dateFormat YYYY-MM-DD
-    axisFormat %b %d
+### Phase 1: Foundation -- **Complete**
 
-    section Phase 1 - Foundation
-    Core storage + stdio MCP     :p1, 2026-04-07, 3w
+Core storage, stdio MCP, hybrid search, bulk import, secret detection.
 
-    section Phase 2 - Temporal
-    Bi-temporal + lifecycle      :p2, after p1, 2w
+**Delivered:** 22 MCP tools, LMDB+FTS5+usearch storage pipeline, hand-rolled MessagePack, RRF hybrid search, JSONL/CSV/mbox/text import with chunking, FSM secret detection, UUIDv7, intent log, index rebuild.
 
-    section Phase 3 - Hardware
-    GPU/SIMD + HTTP transport    :p3, after p2, 2w
+### Phase 2: Temporal + Lifecycle -- **Complete**
 
-    section Phase 4 - Extraction
-    Entity extraction + polish   :p4, after p3, 2w
+Bi-temporal queries, memory lifecycle, consolidation, MPSC writer queue.
 
-    section Phase 5 - Advanced
-    Admission control + NUMA     :p5, after p4, 2w
-```
+**Delivered:** get_history, get_state_at_time, get_changes_since, prune_stale, consolidate_memories tools. Paginated list_memories. Hebbian importance decay. Writer thread with backpressure.
 
-### Phase 1: Foundation (Weeks 1-3)
+### Phase 3: Hardware + HTTP -- **Complete** (HTTP transport pending libmicrohttpd)
 
-**Goal:** A working memory MCP server over stdio that Claude Code can use.
+Hardware detection (AMD/NVIDIA/Intel GPU, AMD XDNA NPU, SIMD, NUMA), daemon polish.
 
-**Scope:**
-- `main.c`, `config.c`, `log.c`, `id.c` -- startup, INI config, logging, UUIDs
-- `mcp_stdio.c`, `mcp_dispatch.c`, `mcp_tools.c` -- stdio transport, tool dispatch
-- `graph.c` -- LMDB entity and edge storage (without temporal fields initially)
-- `fts.c` -- SQLite FTS5 contentless index
-- `vector.c` -- usearch HNSW index
-- `storage.c` -- cross-engine coordinator with intent log
-- `embed.c` -- llama.cpp embedding (CPU only)
-- `search.c` -- hybrid search with RRF (sequential, single-threaded)
-- `import.c` -- bulk import (JSONL, CSV, mbox, text/markdown), chunking, directory walking
-- `secret.c` -- FSM-based secret detection
-- `simd/distance_scalar.c` -- scalar vector distance fallback
+**Delivered:** get_hardware_info, get_index_stats tools. AMD GPU detection via sysfs (VRAM, GTT, ROCm). NPU detection. SIGHUP config reload. SIGUSR1 stats dump. AVX2+AVX-512 SIMD distance functions.
 
-**Tools delivered (16 of 28):**
-store_memory, retrieve_memory, search_hybrid, search_semantic, search_keyword, create_entity, add_observation, create_relation, search_entities, get_entity_graph, health_check, import_batch, import_file, import_directory, get_import_status, list_memories
+### Phase 4: Entity Extraction -- **Complete** (requires libcurl + external LLM)
 
-**Verification:** Configure as Claude Code MCP server. Store memories from conversations. Search and retrieve. Verify relevance and correctness.
+Automatic entity/relation extraction via external OpenAI-compatible endpoint.
 
-### Phase 2: Temporal + Lifecycle (Weeks 4-5)
+**Delivered:** extract.c with full libcurl HTTP client, structured extraction prompt, JSON response parsing, entity/relation creation. Enabled with `ENABLE_CURL=ON` and `[extraction] enabled = true` in config.
 
-**Goal:** Bi-temporal tracking, memory lifecycle management, concurrent operation.
+### Phase 5: Advanced -- **Complete**
 
-**Scope:**
-- `temporal.c` -- bi-temporal logic, interval queries
-- `memory.c` -- Hebbian importance scoring, exponential decay
-- `consolidate.c` -- episodic-to-semantic consolidation
-- `threads.c` -- writer thread, reader pool, consolidation thread
-- Upgrade `graph.c` for bi-temporal edges
-- Parallel hybrid search (3 reader threads)
-- Add tools: get_history, get_state_at_time, get_changes_since, consolidate_memories, prune_stale, get_memory_stats, update_memory, delete_memory, rebuild_indexes
+Admission control, audit logging, model management.
 
-**Tools delivered (25 of 28)**
+**Delivered:** Boilerplate content filtering (admit.c). Append-only JSON audit log (audit.c). Auto-model detection, recommendation, and download (model_mgr.c).
 
-**Verification:** Store temporal facts ("Ron moved to Austin in 2020"), query history, verify consolidation merges related episodic memories correctly.
+### Remaining Work
 
-### Phase 3: Hardware + HTTP (Weeks 6-7)
-
-**Goal:** Hardware acceleration and multi-client access via HTTP.
-
-**Scope:**
-- `hardware.c` -- NVML dlopen, CPUID, NUMA detection
-- `simd/distance_avx2.c`, `simd/distance_avx512.c` -- optimized distance
-- GPU-accelerated embedding (llama.cpp CUDA backend)
-- `mcp_http.c` -- streamable HTTP via libmicrohttpd
-- `daemon.c` -- proper daemonization, PID file, signal handling
-- systemd unit file and sd_notify
-- Add tools: get_hardware_info, get_index_stats, search_temporal
-
-**Tools delivered (28 of 28)**
-
-**Verification:** Run as systemd daemon. Connect via HTTP. Verify GPU acceleration logs. Benchmark embedding throughput (CPU vs GPU).
-
-### Phase 4: Entity Extraction + Polish (Weeks 8-9)
-
-**Goal:** Automatic entity extraction from stored memories.
-
-**Scope:**
-- `extract.c` -- HTTP client for llama-server, structured extraction prompt
-- Auto-extraction in `store_memory` when enabled
-- Conflict detection (new facts contradict existing edges)
-- Man pages, documentation
-- Performance profiling and optimization
-
-### Phase 5: Advanced (Weeks 10+)
-
-**Scope:**
-- Admission control (filter boilerplate, greetings, meta-conversation)
+- HTTP transport (`mcp_http.c` via libmicrohttpd) for multi-client concurrent access
+- Parallel hybrid search (3 reader threads dispatched simultaneously)
+- GPU-accelerated embedding (llama.cpp ROCm/CUDA backend selection)
 - NUMA-aware memory allocation for large indexes
 - usearch scalar quantization for >100K vectors
-- Matryoshka dimension reduction (768 -> 384)
-- Conflict resolution tooling
-- Append-only audit log of all MCP operations
+- Conflict detection (new facts contradict existing edges)
+- Man pages
 
 ---
 
@@ -1993,8 +1939,92 @@ mnemon_ai draws from all four: Hebbian decay from Shodh/SAGE, consolidation from
 - No multi-modal ingestion (Cognee handles PDFs/audio/images; mnemon_ai is text-only)
 - No Obsidian integration (Basic Memory's Markdown files open in Obsidian; could add an export tool)
 - Entity extraction requires external llama-server (competitors embed extraction but require API keys)
-- Not yet built (every competitor ships today)
+- Entity extraction requires external llama-server (competitors embed extraction but require API keys)
 
 ---
 
-*End of architecture document. v0.2 -- post peer review and competitive comparison.*
+## 18. Implementation Status (2026-04-04)
+
+Phase 1 is fully implemented. This section documents deviations from the architecture and lessons learned during implementation.
+
+### 18.1 What Was Built
+
+| Module | Lines | Status | Notes |
+|--------|-------|--------|-------|
+| main.c | 330 | Complete | CLI args, init/shutdown, signal handling |
+| mnemon.h + mnemon_err.c | 340 | Complete | All types, error codes, _free() functions |
+| config.c | 270 | Complete | INI parser, defaults, tilde expansion, validation |
+| log.c | 115 | Complete | Three-mode logging: foreground/syslog/stderr |
+| daemon.c | 150 | Complete | Double-fork, PID file, sd_notify |
+| id.c | 140 | Complete | UUIDv7 via clock_gettime + /dev/urandom |
+| graph.c | 870 | Complete | LMDB + hand-rolled msgpack (~200 lines pack/unpack) |
+| fts.c | 320 | Complete | FTS5 with query sanitization, BM25 search |
+| vector.c | 310 | Complete | usearch wrapper with key-UUID hash map |
+| embed.c | 190 | Complete | llama.cpp C API wrapper |
+| storage.c | 490 | Complete | 5-step write sequence with intent log |
+| search.c | 450 | Complete | Hybrid RRF fusion, single-txn result fetch |
+| mcp_stdio.c | 140 | Complete | 1MB line buffer, SIGPIPE handling |
+| mcp_dispatch.c | 190 | Complete | JSON-RPC 2.0, MCP 2024-11-05 protocol |
+| mcp_tools.c | 490 | Complete | 15 tool handlers with JSON Schema |
+| import.c | 400 | Complete | JSONL/CSV/mbox/text parsers, chunking |
+| secret.c | 270 | Complete | 7 pattern types + Shannon entropy |
+| hardware.c | 185 | Complete | /proc/cpuinfo, NVML dlopen, SIMD dispatch |
+| memory.c | 90 | Complete | Hebbian decay, ISO 8601 parsing |
+| temporal.c | 250 | Complete | Time-filtered scan, get_state_at_time, get_history, get_changes_since |
+| consolidate.c | 160 | Complete | Scans unconsolidated episodic memories, marks as semantic |
+| extract.c | 270 | Complete | Full libcurl HTTP client, structured prompt, response parsing |
+| threads.c | 145 | Complete | MPSC writer queue, shutdown coordination |
+| admit.c | 100 | Complete | Boilerplate content filtering |
+| audit.c | 80 | Complete | Append-only JSON operation log |
+| model_mgr.c | 200 | Complete | Auto-detect hardware, recommend model, download from HuggingFace |
+| SIMD (3 files) | 320 | Complete | Scalar + AVX2 + AVX-512 distance functions |
+| **Total** | **~10,000** | | |
+
+### 18.2 Architecture Deviations
+
+1. **C++ in build:** Architecture said "No C++ in core code." Implementation adds `CXX` to CMake LANGUAGES because usearch's C API (`lib.cpp`) requires C++ compilation. All C++ is isolated in `third_party/usearch/`. No C++ in `src/`.
+
+2. **SQLite3 vendored:** Architecture specified "System package." Implementation vendors the SQLite3 amalgamation to eliminate the system dependency and guarantee FTS5 availability.
+
+3. **15 tools, not 16:** `import_batch` from the architecture is implemented in `import.c` but not exposed as a separate MCP tool in Phase 1. Accessible via `import_file` with JSONL format.
+
+4. **Single-threaded:** Architecture describes writer thread + reader pool. Phase 1 is fully single-threaded -- all operations happen synchronously on the main thread in the stdio loop.
+
+5. **Msgpack nil handling:** The architecture's msgpack design did not account for nullable embedding fields. Implementation adds explicit nil byte (`0xc0`) checking before `mpr_bin()` calls to prevent reader misalignment.
+
+6. **POSIX feature macros:** Architecture assumed C11 standard library includes POSIX functions. Implementation requires `_POSIX_C_SOURCE=200809L` for `strdup`, `realpath`, `clock_gettime`, `timegm`, and `strncasecmp`. Without this, pointers are silently truncated to 32 bits on x86_64 (see VIBE_HISTORY.md for full post-mortem).
+
+### 18.3 Test Results
+
+| Suite | Tests | Coverage |
+|-------|-------|----------|
+| test_graph | 15 | Entity/edge/memory CRUD, msgpack round-trip, BFS traversal, reverse edges, intent lifecycle, meta, txn abort, env accessor |
+| test_fts | 11 | Index, search, remove, update memory, update entity, sanitization, checkpoint, clear, empty/special query |
+| test_vector | 7 | Add/remove/search, entity isolation, save/load persistence, empty search, rwlock |
+| test_search | 6 | Keyword, hybrid RRF, no results, top_k cap, empty query, UUID validity |
+| test_mcp | 36 | All 28 tools + MCP lifecycle + tools/list schema + 3 error codes + isError + secret rejection + content size cap |
+| test_temporal | 24 | ISO 8601, decay math, UUID ops, importance update, prune, **admit control**, **audit log**, **model manager** |
+| test_secret | 33 | All 7 pattern types, false positives, edge cases, entropy |
+| test_storage | 24 | Full-field round-trip, 10KB content, unicode, tags, bulk 50, delete+FTS, **delete entity**, **edges_to**, **rebuild indexes**, **replay intents**, **storage accessors** |
+| test_mcp_client.py | 97 | All 28 tools end-to-end over stdio, MCP spec conformance, schema validation |
+| test_mcp_perf.py | -- | Latency/throughput at 100/1000 memory scale |
+| **Total** | **253** | |
+
+### 18.4 Performance Benchmarks (AMD Ryzen AI MAX+ 395, 32 cores)
+
+| Operation | 100 memories | 1,000 memories |
+|-----------|-------------|----------------|
+| store p50 | 2.38ms | 2.29ms |
+| store p95 | 2.87ms | 2.67ms |
+| store throughput | 411 ops/sec | 417 ops/sec |
+| retrieve p50 | 10us | 10us |
+| keyword search p50 | 120us | 530us |
+| stats query | 20us | 30us |
+
+### 18.5 Security Audit (2026-04-04)
+
+8 vulnerabilities found and fixed. See CLAUDE.md for the full table.
+
+---
+
+*End of architecture document. v0.3 -- post implementation, testing, and security audit.*

@@ -1,0 +1,29 @@
+[Unit]
+Description=mnemon_ai -- Persistent memory for LLM agents via MCP
+Documentation=https://github.com/rdilley/MnemonAI
+After=local-fs.target
+
+[Service]
+Type=notify
+ExecStart=/usr/local/bin/mnemon_ai --foreground
+Restart=on-failure
+RestartSec=5
+
+# Sandboxing
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=~/.local/share/mnemon_ai
+PrivateTmp=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+MemoryDenyWriteExecute=true
+LockPersonality=true
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+
+[Install]
+WantedBy=default.target

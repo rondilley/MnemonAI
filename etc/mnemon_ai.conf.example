@@ -1,0 +1,66 @@
+# mnemon_ai.conf -- Configuration for mnemon_ai daemon
+#
+# Config search path:
+#   1. --config <path>  (command line)
+#   2. $XDG_CONFIG_HOME/mnemon_ai/mnemon_ai.conf
+#   3. ~/.config/mnemon_ai/mnemon_ai.conf
+#   4. /etc/mnemon_ai/mnemon_ai.conf
+#
+# Missing config is not an error -- all settings have sane defaults.
+
+[general]
+data_dir = ~/.local/share/mnemon_ai
+log_level = info                    # debug, info, warn, error
+foreground = false
+
+[lmdb]
+map_size_gb = 10                    # Maximum database size (virtual, not pre-allocated)
+max_readers = 64
+
+[embedding]
+model_path = ~/.local/share/mnemon_ai/models/nomic-embed-text-v1.5.Q8_0.gguf
+dimensions = 768
+batch_size = 32                     # Batch size for consolidation/bulk ops
+gpu_layers = 99                     # Layers to offload to GPU (99 = all if GPU available)
+model_sha256 =                      # Optional SHA-256 hash for model integrity verification
+
+[extraction]
+enabled = false
+endpoint = http://127.0.0.1:8080/v1/chat/completions
+timeout_ms = 10000
+model =                             # Empty = use server default
+
+[search]
+default_top_k = 10
+max_top_k = 50
+rrf_k = 60                         # RRF constant (standard value from literature)
+
+[consolidation]
+threshold = 100                     # Unconsolidated memories before auto-trigger
+interval_sec = 3600                 # Periodic consolidation interval
+similarity_threshold = 0.7         # Cosine similarity for clustering
+
+[decay]
+half_life_days = 90                 # Importance halves without access
+min_importance = 0.01               # Below this, eligible for pruning
+
+[import]
+allowed_paths = ~                   # Directories import_file/import_directory can read from
+max_batch_size = 1000               # Max memories per import_batch call
+default_chunk_size = 4096           # Default max chars per chunk
+writer_batch_size = 50              # Memories per writer queue submission (avoids blocking)
+
+[security]
+detect_secrets = true
+max_memory_size_kb = 64             # Reject memories larger than this
+
+[threads]
+reader_pool_size = 0                # 0 = auto (min(nproc, 16))
+write_queue_depth = 1024
+
+[http]
+enabled = false
+bind = 127.0.0.1
+port = 3847
+max_connections = 32
+auth_token =                        # Required if bind != 127.0.0.1; static Bearer token

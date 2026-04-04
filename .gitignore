@@ -53,3 +53,39 @@ dkms.conf
 
 # debug information files
 *.dwo
+
+# CMake build directories
+build/
+build-*/
+cmake-build-*/
+
+# CMake generated files
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+compile_commands.json
+CTestTestfile.cmake
+Makefile
+config.h
+
+# CPack
+_CPack_Packages/
+*.tar.gz
+*.tar.xz
+
+# API keys (never commit)
+*.key.txt
+
+# Python virtual environments
+venv/
+.venv/
+
+# GGUF model files
+models/*.gguf
+
+# Editor / IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
