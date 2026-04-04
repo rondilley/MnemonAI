@@ -1,0 +1,2 @@
+# MnemonAI
+A memory MCP
