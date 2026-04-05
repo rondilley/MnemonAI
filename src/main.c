@@ -247,14 +247,17 @@ static char *resolve_config_path(const char *explicit_path)
             return strdup(path);
     }
 
+    /* Check compiled-in SYSCONFDIR (e.g., ~/.local/etc/mnemond) */
+    snprintf(path, sizeof(path), "%s/mnemond.conf", SYSCONFDIR);
+    if (stat(path, &st) == 0)
+        return strdup(path);
+
     if (stat("/etc/mnemond/mnemond.conf", &st) == 0)
         return strdup("/etc/mnemond/mnemond.conf");
 
-    /* No existing config; default to ~/.config/mnemond/mnemond.conf */
-    if (home) {
-        snprintf(path, sizeof(path), "%s/.config/mnemond/mnemond.conf", home);
-        return strdup(path);
-    }
+    /* No existing config; default to SYSCONFDIR/mnemond.conf */
+    snprintf(path, sizeof(path), "%s/mnemond.conf", SYSCONFDIR);
+    return strdup(path);
 
     return NULL;
 }

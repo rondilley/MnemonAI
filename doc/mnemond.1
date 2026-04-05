@@ -141,8 +141,10 @@ and a confirmation message is printed to standard error.
 Use
 .B \-\-config
 to specify which file to write to; otherwise the standard search path
-is used, defaulting to
-.IR ~/.config/mnemond/mnemond.conf .
+is used, defaulting to the compiled-in
+.I SYSCONFDIR/mnemond.conf
+(typically
+.IR ~/.local/etc/mnemond/mnemond.conf ).
 Parent directories are created as needed.
 .IP
 Example:
@@ -174,6 +176,10 @@ Path given by
 .IP 3.
 .I ~/.config/mnemond/mnemond.conf
 .IP 4.
+.I SYSCONFDIR/mnemond.conf
+(compiled-in, e.g.,
+.IR ~/.local/etc/mnemond/mnemond.conf )
+.IP 5.
 .I /etc/mnemond/mnemond.conf
 .PD
 .RE
@@ -510,8 +516,8 @@ version byte per record.
 IDs are UUIDv7 (RFC\ 9562), providing time-sortable 16-byte binary keys.
 .SH FILES
 .TP
-.I ~/.config/mnemond/mnemond.conf
-Default user configuration file.
+.I ~/.local/etc/mnemond/mnemond.conf
+Default user configuration file (compiled-in SYSCONFDIR).
 .TP
 .I /etc/mnemond/mnemond.conf
 System-wide configuration file.

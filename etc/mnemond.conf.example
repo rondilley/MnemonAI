@@ -4,7 +4,8 @@
 #   1. --config <path>  (command line)
 #   2. $XDG_CONFIG_HOME/mnemond/mnemond.conf
 #   3. ~/.config/mnemond/mnemond.conf
-#   4. /etc/mnemond/mnemond.conf
+#   4. SYSCONFDIR/mnemond.conf  (compiled-in, e.g., ~/.local/etc/mnemond/)
+#   5. /etc/mnemond/mnemond.conf
 #
 # Missing config is not an error -- all settings have sane defaults.
 

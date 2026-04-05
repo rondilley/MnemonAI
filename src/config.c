@@ -227,6 +227,10 @@ mnemon_err_t mnemon_config_load(const char *path, mnemon_config_t **out)
             }
         }
         if (!found) {
+            snprintf(search, sizeof(search), "%s/mnemond.conf", SYSCONFDIR);
+            if (parse_ini(cfg, search) == MNEMON_OK) found = true;
+        }
+        if (!found) {
             parse_ini(cfg, "/etc/mnemond/mnemond.conf");
         }
     }

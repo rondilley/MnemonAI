@@ -159,8 +159,8 @@ Press `Ctrl+C` to stop. The model and data directories are created automatically
 To skip the model download (run without embeddings):
 
 ```bash
-mkdir -p ~/.config/mnemond
-echo -e "[embedding]\nmodel_path = none" > ~/.config/mnemond/mnemond.conf
+mkdir -p ~/.local/etc/mnemond
+echo -e "[embedding]\nmodel_path = none" > ~/.local/etc/mnemond/mnemond.conf
 ```
 
 ### Step 7: GPU Warmup (AMD/NVIDIA GPU Only)
@@ -186,7 +186,7 @@ This loads the model, compiles GPU kernels, runs one test embedding, and exits. 
 
 **No GPU?** Skip this step -- CPU inference starts instantly with no JIT step.
 
-**Want verbose model loading details?** Set `log_level = debug` in `~/.config/mnemond/mnemond.conf` to see per-tensor and metadata output. At the default `info` level, llama.cpp's verbose output is suppressed.
+**Want verbose model loading details?** Set `log_level = debug` in `~/.local/etc/mnemond/mnemond.conf` to see per-tensor and metadata output. At the default `info` level, llama.cpp's verbose output is suppressed.
 
 ### Step 8: Run Tests (Optional)
 
@@ -258,7 +258,7 @@ Upgrade to kernel 6.18+ which includes the CWSR fix for gfx1151. Once on 6.18+, 
 If GPU issues persist, force CPU-only embedding by setting `gpu_layers = 0` in the config:
 
 ```ini
-# ~/.config/mnemond/mnemond.conf
+# ~/.local/etc/mnemond/mnemond.conf
 [embedding]
 gpu_layers = 0
 ```
@@ -380,8 +380,8 @@ graph TB
 1. **Create a config file with HTTP enabled:**
 
 ```bash
-mkdir -p ~/.config/mnemond
-cat > ~/.config/mnemond/mnemond.conf << 'EOF'
+mkdir -p ~/.local/etc/mnemond
+cat > ~/.local/etc/mnemond/mnemond.conf << 'EOF'
 [general]
 data_dir = ~/.local/share/mnemond
 log_level = info
@@ -640,7 +640,10 @@ Config search path:
 1. `--config <path>` (command line)
 2. `$XDG_CONFIG_HOME/mnemond/mnemond.conf`
 3. `~/.config/mnemond/mnemond.conf`
-4. `/etc/mnemond/mnemond.conf`
+4. `SYSCONFDIR/mnemond.conf` (compiled-in, typically `~/.local/etc/mnemond/mnemond.conf`)
+5. `/etc/mnemond/mnemond.conf`
+
+When creating a new config (e.g., `--gen-key` with no existing file), the default location is `SYSCONFDIR/mnemond.conf`.
 
 Default data directory: `~/.local/share/mnemond/` (created automatically on first run).
 
@@ -717,6 +720,7 @@ max_memory_size_kb = 64               # per-memory content size limit
 
 ## Documentation
 
+- [MCP Reference](doc/MCP-REFERENCE.md) -- complete protocol, tools, and API reference (for developers and AI agents)
 - [Architecture](doc/ARCHITECTURE.md) -- full system design (v0.4, peer-reviewed)
 - [Research Synthesis](doc/research-synthesis.md) -- landscape analysis and academic survey
 - [Landscape Report](doc/memory-mcp-report-v2.md) -- practitioner guide to existing memory MCP servers
