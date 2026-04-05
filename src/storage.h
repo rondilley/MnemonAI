@@ -18,6 +18,7 @@ typedef struct mnemon_graph mnemon_graph_t;
 typedef struct mnemon_fts mnemon_fts_t;
 typedef struct mnemon_vector mnemon_vector_t;
 typedef struct mnemon_embed mnemon_embed_t;
+typedef struct mnemon_honeypot mnemon_honeypot_t;
 
 typedef struct mnemon_storage mnemon_storage_t;
 
@@ -92,6 +93,14 @@ mnemon_err_t mnemon_get_stats(mnemon_storage_t *s, mnemon_stats_t *out);
 mnemon_graph_t  *mnemon_storage_graph(mnemon_storage_t *s);
 mnemon_fts_t    *mnemon_storage_fts(mnemon_storage_t *s);
 mnemon_vector_t *mnemon_storage_vector(mnemon_storage_t *s);
-mnemon_embed_t  *mnemon_storage_embed(mnemon_storage_t *s);
+mnemon_embed_t      *mnemon_storage_embed(mnemon_storage_t *s);
+mnemon_honeypot_t       *mnemon_storage_honeypot(mnemon_storage_t *s);
+void                     mnemon_storage_set_honeypot(mnemon_storage_t *s,
+                                                     mnemon_honeypot_t *hp);
+
+typedef struct mnemon_reader_pool mnemon_reader_pool_t;
+mnemon_reader_pool_t    *mnemon_storage_reader_pool(mnemon_storage_t *s);
+void                     mnemon_storage_set_reader_pool(mnemon_storage_t *s,
+                                                        mnemon_reader_pool_t *pool);
 
 #endif /* MNEMON_STORAGE_H */

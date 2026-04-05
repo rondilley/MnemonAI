@@ -164,3 +164,128 @@ mnemon_err_t mnemon_writer_submit(mnemon_writer_t *w, write_op_t *op)
 
     return (op->result == 0) ? MNEMON_OK : MNEMON_ERR_INTERNAL;
 }
+
+/* ---- Reader pool ---- */
+
+static void *reader_pool_worker(void *arg)
+{
+    mnemon_reader_pool_t *pool = (mnemon_reader_pool_t *)arg;
+
+    while (1) {
+        reader_task_t *task = NULL;
+
+        pthread_mutex_lock(&pool->mutex);
+        while (pool->head == NULL && pool->running)
+            pthread_cond_wait(&pool->cond, &pool->mutex);
+
+        if (!pool->running && pool->head == NULL) {
+            pthread_mutex_unlock(&pool->mutex);
+            break;
+        }
+
+        if (pool->head) {
+            task = pool->head;
+            pool->head = task->next;
+            if (!pool->head)
+                pool->tail = NULL;
+        }
+        pthread_mutex_unlock(&pool->mutex);
+
+        if (task) {
+            task->fn(task->arg);
+
+            pthread_mutex_lock(&task->mutex);
+            task->done = true;
+            pthread_cond_signal(&task->cond);
+            pthread_mutex_unlock(&task->mutex);
+        }
+    }
+    return NULL;
+}
+
+mnemon_err_t mnemon_reader_pool_start(mnemon_reader_pool_t *pool, int size)
+{
+    if (!pool || size < 1) return MNEMON_ERR_INVALID_INPUT;
+
+    memset(pool, 0, sizeof(*pool));
+    pool->pool_size = size;
+    pool->running = true;
+    pthread_mutex_init(&pool->mutex, NULL);
+    pthread_cond_init(&pool->cond, NULL);
+
+    pool->threads = calloc((size_t)size, sizeof(pthread_t));
+    if (!pool->threads) return MNEMON_ERR_OOM;
+
+    for (int i = 0; i < size; i++) {
+        if (pthread_create(&pool->threads[i], NULL, reader_pool_worker, pool) != 0) {
+            /* Partially started -- stop what we have */
+            pool->pool_size = i;
+            mnemon_reader_pool_stop(pool);
+            return MNEMON_ERR_INTERNAL;
+        }
+    }
+
+    mnemon_log(MNEMON_LOG_INFO, "reader pool started with %d threads", size);
+    return MNEMON_OK;
+}
+
+void mnemon_reader_pool_stop(mnemon_reader_pool_t *pool)
+{
+    if (!pool || !pool->threads) return;
+
+    pthread_mutex_lock(&pool->mutex);
+    pool->running = false;
+    pthread_cond_broadcast(&pool->cond);
+    pthread_mutex_unlock(&pool->mutex);
+
+    for (int i = 0; i < pool->pool_size; i++)
+        pthread_join(pool->threads[i], NULL);
+
+    free(pool->threads);
+    pool->threads = NULL;
+    pthread_mutex_destroy(&pool->mutex);
+    pthread_cond_destroy(&pool->cond);
+
+    mnemon_log(MNEMON_LOG_INFO, "reader pool stopped");
+}
+
+mnemon_err_t mnemon_reader_pool_submit(mnemon_reader_pool_t *pool,
+                                       reader_task_t *task)
+{
+    if (!pool || !task || !task->fn) return MNEMON_ERR_INVALID_INPUT;
+
+    pthread_mutex_init(&task->mutex, NULL);
+    pthread_cond_init(&task->cond, NULL);
+    task->done = false;
+    task->next = NULL;
+
+    pthread_mutex_lock(&pool->mutex);
+    if (!pool->running) {
+        pthread_mutex_unlock(&pool->mutex);
+        return MNEMON_ERR_SHUTDOWN;
+    }
+
+    if (pool->tail)
+        pool->tail->next = task;
+    else
+        pool->head = task;
+    pool->tail = task;
+
+    pthread_cond_signal(&pool->cond);
+    pthread_mutex_unlock(&pool->mutex);
+
+    return MNEMON_OK;
+}
+
+void mnemon_reader_task_wait(reader_task_t *task)
+{
+    if (!task) return;
+
+    pthread_mutex_lock(&task->mutex);
+    while (!task->done)
+        pthread_cond_wait(&task->cond, &task->mutex);
+    pthread_mutex_unlock(&task->mutex);
+
+    pthread_mutex_destroy(&task->mutex);
+    pthread_cond_destroy(&task->cond);
+}

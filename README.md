@@ -10,15 +10,15 @@ Every piece of data stays on your local filesystem. No API keys required for cor
 
 ## Key Features
 
-- **Hybrid Search** -- graph traversal + vector similarity + BM25 keyword search, fused via Reciprocal Rank Fusion (RRF)
+- **Hybrid Search** -- graph traversal + vector similarity + BM25 keyword search, fused via Reciprocal Rank Fusion (RRF). Three rankers run in parallel via persistent reader pool or ad-hoc pthreads.
 - **Bi-Temporal Knowledge Graph** -- every fact tracks when it was true (domain time) and when it was recorded (transaction time), with non-destructive updates
 - **Local Embeddings** -- llama.cpp in-process with nomic-embed-text-v1.5 (no external API)
 - **Hardware-Aware** -- auto-detects AMD/NVIDIA/Intel GPU, AMD XDNA NPU, SIMD (AVX2/AVX-512), and NUMA at runtime
-- **Network MCP Server** -- Streamable HTTP transport (MCP 2025-03-26 spec) with Bearer auth, session management, and Origin validation. Run one instance on a server, connect from any machine.
-- **Memory Lifecycle** -- multi-tier memory (episodic/semantic/procedural), Hebbian importance decay, episodic-to-semantic consolidation
-- **Bulk Import** -- ingest email (mbox), CSV, JSONL, Markdown, and plain text with rich source metadata and configurable chunking
+- **Network MCP Server** -- Streamable HTTP transport (MCP 2025-03-26 spec) with TLS, Bearer auth, session management, SSE streaming, and Origin validation. Run one instance on a server, connect from any machine.
+- **Memory Lifecycle** -- multi-tier memory (episodic/semantic/procedural), Hebbian importance decay, episodic-to-semantic consolidation with automatic entity deduplication and merge
+- **Bulk Import** -- ingest email (mbox), CSV, JSONL, Markdown, and plain text with rich source metadata, configurable chunking, recursive directory traversal, and background job tracking
 - **32 MCP Tools** -- 28 functional tools (memory CRUD, entity/graph, four search modes, temporal queries, bulk import, maintenance, hardware introspection) + 4 honeypot decoy tools
-- **Security** -- FSM-based secret detection, prompt injection scanner, content size limits, auth brute-force tracking, canary records, decoy admin tools, enumeration detection, credential query detection, OWASP MCP Top 10 mitigations
+- **Security** -- FSM-based secret detection, prompt injection scanner (integrated into store path, score >= 7.0 blocks storage), content size limits, auth brute-force detection (per-IP rate limiting wired into HTTP layer), canary records, decoy admin tools, enumeration detection, credential query detection, OWASP MCP Top 10 mitigations
 - **Crash-Safe** -- LMDB (ACID, mmap, zero-copy), write-ahead intent log, rebuildable derived indexes (FTS5 + usearch)
 
 ## Architecture
@@ -56,11 +56,14 @@ graph TB
 
 ## Status
 
-**All phases complete.** Dual transport (stdio + HTTP), 32 MCP tools (28 functional + 4 honeypot), hybrid search with RRF fusion, network server with auth/sessions, hardware detection (AMD/NVIDIA GPU, AMD NPU, SIMD), auto-model download, entity extraction, prompt injection detection, admission control, and audit logging.
+**All phases complete. No known gaps.** Dual transport (stdio + Streamable HTTP with SSE), 32 MCP tools (28 functional + 4 honeypot), parallel hybrid search with RRF fusion, network server with TLS/auth/sessions, hardware detection (AMD/NVIDIA GPU, AMD NPU, SIMD), auto-model download, entity extraction, prompt injection detection integrated into store path, auth brute-force detection, admission control, audit logging, persistent reader pool, recursive imports with background job tracking, and entity merging in consolidation.
 
-- 11,500+ lines of C source across 28 modules
-- 325 tests (178 C unit + 105 Python stdio + 42 Python HTTP)
+- 12,500+ lines of C source across 30 modules
+- 343 tests (196 C unit + 105 Python stdio + 42 Python HTTP)
 - 32 MCP tools, all tested at API, stdio, and HTTP levels
+- GPU-accelerated embedding via ROCm HIP (AMD) or CUDA (NVIDIA)
+- AVX-512/AVX2 SIMD for vector distance computation and L2 normalization
+- Persistent reader thread pool for parallel search dispatch
 - Performance: 417 ops/sec store, 10us retrieve, 530us search at 1K memories
 - Zero segfaults, zero warnings (`-Werror=implicit-function-declaration`)
 
@@ -470,6 +473,17 @@ gpu_layers = 99                       # layers to offload to GPU (99 = all)
 default_top_k = 10                    # results per search
 rrf_k = 60                           # RRF fusion constant
 
+[http]
+enabled = true                        # enable HTTP transport
+bind = 127.0.0.1                      # bind address
+port = 3847                           # listen port
+auth_token = YOUR-SECRET-TOKEN        # required for non-localhost binding
+tls_cert = /path/to/cert.pem          # TLS certificate (optional)
+tls_key = /path/to/key.pem            # TLS private key (optional)
+
+[threads]
+reader_pool_size = 4                  # persistent reader threads (0 = ad-hoc)
+
 [security]
 detect_secrets = true                 # reject content containing API keys, tokens
 max_memory_size_kb = 64               # per-memory content size limit
@@ -486,7 +500,8 @@ max_memory_size_kb = 64               # per-memory content size limit
 | 5. Advanced | Admission control, audit log, auto-model download | **Complete** |
 | 6. HTTP Transport | Streamable HTTP (MCP 2025-03-26), multi-session, Bearer auth | **Complete** (libmicrohttpd) |
 | 7. Honeypot | Prompt injection scanner, canary records, decoy tools, brute-force detection, enumeration detection | **Complete** |
-| Remaining | Parallel search dispatch, GPU embedding auto-selection, TLS certs | In progress |
+| 8. GPU/SIMD Acceleration | ROCm HIP GPU embedding, batch embedding, SIMD distance functions wired into live code | **Complete** |
+| 9. Integration | Parallel search, TLS config, SSE streaming, recursive imports, background jobs, injection scanner wiring, auth brute-force wiring, entity merging, reader pool | **Complete** |
 
 ## Dependencies
 

@@ -26,6 +26,7 @@
 #include "config_parse.h"
 #include "search.h"
 #include "fts.h"
+#include "consolidate.h"
 #include "id.h"
 #include "memory.h"
 #include "mnemon.h"
@@ -758,9 +759,83 @@ static void test_null_args(void)
     PASS();
 }
 
+/* ================================================================ */
+/* 12. Consolidation with SIMD clustering                          */
+/* ================================================================ */
+
+static void test_consolidation_marks_semantic(void)
+{
+    TEST("consolidation marks episodic memories as semantic");
+    /* Store some episodic memories */
+    for (int i = 0; i < 3; i++) {
+        mnemon_memory_t m = {0};
+        mnemon_uuid_t u; mnemon_uuid_generate(&u);
+        memcpy(m.id, u.bytes, 16);
+        char buf[64];
+        snprintf(buf, sizeof(buf), "Consolidation test memory %d about databases", i);
+        m.content = strdup(buf);
+        m.source_type = strdup("test");
+        m.source_id = strdup("");
+        m.tier = MNEMON_TIER_EPISODIC;
+        m.consolidated = false;
+        m.created_at = mnemon_time_ms();
+        m.last_accessed = m.created_at;
+        mnemon_store_memory(store, &m);
+        mnemon_memory_free(&m);
+    }
+
+    /* Run consolidation (not dry_run) */
+    mnemon_consolidation_result_t cr = {0};
+    mnemon_err_t err = mnemon_consolidate(store, NULL, NULL, false, &cr);
+    ASSERT(err == MNEMON_OK, "consolidate ok");
+    ASSERT(cr.consolidated_count >= 3, "consolidated >= 3");
+    ASSERT(cr.duration_ms >= 0, "duration reported");
+    printf("[consolidated=%d duration=%lldms] ",
+           cr.consolidated_count, (long long)cr.duration_ms);
+    PASS();
+}
+
+static void test_consolidation_dry_run(void)
+{
+    TEST("consolidation dry_run counts without modifying");
+    /* Store one more episodic */
+    mnemon_memory_t m = {0};
+    mnemon_uuid_t u; mnemon_uuid_generate(&u);
+    memcpy(m.id, u.bytes, 16);
+    m.content = strdup("Dry run test memory");
+    m.source_type = strdup("test");
+    m.source_id = strdup("");
+    m.tier = MNEMON_TIER_EPISODIC;
+    m.created_at = mnemon_time_ms();
+    m.last_accessed = m.created_at;
+    mnemon_store_memory(store, &m);
+
+    mnemon_consolidation_result_t cr = {0};
+    mnemon_consolidate(store, NULL, NULL, true, &cr);
+    ASSERT(cr.consolidated_count >= 1, "found candidates");
+
+    /* Verify memory is still episodic (dry_run didn't change it) */
+    mnemon_memory_t out = {0};
+    mnemon_get_memory(store, m.id, &out);
+    ASSERT(out.tier == MNEMON_TIER_EPISODIC, "still episodic after dry_run");
+
+    mnemon_memory_free(&m);
+    mnemon_memory_free(&out);
+    PASS();
+}
+
+static void test_consolidation_topic_filter(void)
+{
+    TEST("consolidation with topic filter");
+    mnemon_consolidation_result_t cr = {0};
+    mnemon_consolidate(store, "nonexistent_topic_xyz", NULL, true, &cr);
+    ASSERT(cr.consolidated_count == 0, "no matches for bogus topic");
+    PASS();
+}
+
 int main(void)
 {
-    printf("=== test_storage: Memory Storage & Retrieval (%d tests) ===\n", 18);
+    printf("=== test_storage: Memory Storage & Retrieval ===\n");
     setup();
 
     /* Basic CRUD */
@@ -802,12 +877,17 @@ int main(void)
     test_delete_nonexistent_memory();
     test_null_args();
 
-    /* Phase 2 coverage: untested storage functions */
+    /* Storage function coverage */
     test_delete_entity();
     test_get_edges_to();
     test_rebuild_indexes();
     test_replay_intents();
     test_storage_accessors();
+
+    /* Consolidation with SIMD clustering */
+    test_consolidation_marks_semantic();
+    test_consolidation_dry_run();
+    test_consolidation_topic_filter();
 
     teardown();
     printf("\n%d/%d passed, %d failed\n", passed, total, failed);

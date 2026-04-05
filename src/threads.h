@@ -71,4 +71,41 @@ void         mnemon_writer_stop(mnemon_writer_t *w);
 /* Enqueue a write op and wait for completion (synchronous from caller's POV) */
 mnemon_err_t mnemon_writer_submit(mnemon_writer_t *w, write_op_t *op);
 
+/*
+ * Reader pool -- persistent thread pool for concurrent read tasks.
+ * Tasks are submitted via mnemon_reader_pool_submit() and executed
+ * asynchronously. Callers can wait for completion.
+ */
+
+typedef void (*reader_task_fn)(void *arg);
+
+typedef struct reader_task {
+    reader_task_fn       fn;
+    void                *arg;
+    struct reader_task  *next;
+    bool                 done;
+    pthread_mutex_t      mutex;
+    pthread_cond_t       cond;
+} reader_task_t;
+
+typedef struct mnemon_reader_pool {
+    pthread_t       *threads;
+    int              pool_size;
+    pthread_mutex_t  mutex;
+    pthread_cond_t   cond;
+    reader_task_t   *head;
+    reader_task_t   *tail;
+    bool             running;
+} mnemon_reader_pool_t;
+
+mnemon_err_t mnemon_reader_pool_start(mnemon_reader_pool_t *pool, int size);
+void         mnemon_reader_pool_stop(mnemon_reader_pool_t *pool);
+
+/* Submit a task and optionally wait for completion.
+ * If wait=true, blocks until task completes. If wait=false, caller
+ * must call mnemon_reader_task_wait() later. */
+mnemon_err_t mnemon_reader_pool_submit(mnemon_reader_pool_t *pool,
+                                       reader_task_t *task);
+void         mnemon_reader_task_wait(reader_task_t *task);
+
 #endif /* MNEMON_THREADS_H */

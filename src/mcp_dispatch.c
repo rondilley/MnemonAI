@@ -32,6 +32,8 @@ struct mnemon_dispatch {
     mnemon_storage_t *storage;
     tool_entry_t      tools[MAX_TOOLS];
     int               tool_count;
+    mnemon_notify_fn  notify_fn;
+    void             *notify_ctx;
 };
 
 /* JSON-RPC error response */
@@ -199,6 +201,14 @@ mnemon_err_t mnemon_dispatch_init(mnemon_dispatch_t **out,
 void mnemon_dispatch_free(mnemon_dispatch_t *d)
 {
     free(d);
+}
+
+void mnemon_dispatch_set_notifier(mnemon_dispatch_t *d,
+                                  mnemon_notify_fn fn, void *ctx)
+{
+    if (!d) return;
+    d->notify_fn = fn;
+    d->notify_ctx = ctx;
 }
 
 cJSON *mnemon_dispatch_request(mnemon_dispatch_t *d, const cJSON *request)

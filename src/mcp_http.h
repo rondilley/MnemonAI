@@ -23,6 +23,8 @@
 #include "mnemon.h"
 #include "mcp_dispatch.h"
 
+typedef struct mnemon_honeypot mnemon_honeypot_t;
+
 typedef struct mnemon_http mnemon_http_t;
 
 typedef struct {
@@ -45,5 +47,18 @@ void mnemon_http_stop(mnemon_http_t *h);
 
 /* Get the number of active sessions. */
 int mnemon_http_session_count(const mnemon_http_t *h);
+
+/* Push an SSE event to a specific session's stream.
+ * No-op if session has no active SSE connection. */
+mnemon_err_t mnemon_http_push_event(mnemon_http_t *h, const char *session_id,
+                                    const char *event_type,
+                                    const char *json_data);
+
+/* Push an SSE event to all sessions with active SSE streams. */
+void mnemon_http_broadcast_event(mnemon_http_t *h, const char *event_type,
+                                 const char *json_data);
+
+/* Set the honeypot module for auth brute-force detection. */
+void mnemon_http_set_honeypot(mnemon_http_t *h, mnemon_honeypot_t *hp);
 
 #endif /* MNEMON_MCP_HTTP_H */

@@ -43,13 +43,17 @@
 #include "log.h"
 #include "config_parse.h"
 
+typedef struct mnemon_reader_pool mnemon_reader_pool_t;
+
 struct mnemon_storage {
-    mnemon_graph_t  *graph;
-    mnemon_fts_t    *fts;
-    mnemon_vector_t *vector;
-    mnemon_embed_t  *embed;
-    int              dimensions;
-    int64_t          uptime_start;
+    mnemon_graph_t      *graph;
+    mnemon_fts_t        *fts;
+    mnemon_vector_t     *vector;
+    mnemon_embed_t      *embed;
+    mnemon_honeypot_t   *honeypot;
+    mnemon_reader_pool_t *reader_pool;
+    int                  dimensions;
+    int64_t              uptime_start;
 };
 
 /* Ensure a directory exists, creating it if necessary */
@@ -799,4 +803,25 @@ mnemon_vector_t *mnemon_storage_vector(mnemon_storage_t *s)
 mnemon_embed_t *mnemon_storage_embed(mnemon_storage_t *s)
 {
     return s ? s->embed : NULL;
+}
+
+mnemon_honeypot_t *mnemon_storage_honeypot(mnemon_storage_t *s)
+{
+    return s ? s->honeypot : NULL;
+}
+
+void mnemon_storage_set_honeypot(mnemon_storage_t *s, mnemon_honeypot_t *hp)
+{
+    if (s) s->honeypot = hp;
+}
+
+mnemon_reader_pool_t *mnemon_storage_reader_pool(mnemon_storage_t *s)
+{
+    return s ? s->reader_pool : NULL;
+}
+
+void mnemon_storage_set_reader_pool(mnemon_storage_t *s,
+                                    mnemon_reader_pool_t *pool)
+{
+    if (s) s->reader_pool = pool;
 }

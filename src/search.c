@@ -22,12 +22,15 @@
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
+#include <pthread.h>
 
 #include "search.h"
 #include "graph.h"
 #include "fts.h"
 #include "vector.h"
 #include "embed.h"
+#include "storage.h"
+#include "threads.h"
 #include "id.h"
 #include "log.h"
 
@@ -74,6 +77,133 @@ static int fusion_cmp(const void *a, const void *b)
     if (fb->rrf_score > fa->rrf_score) return 1;
     if (fb->rrf_score < fa->rrf_score) return -1;
     return 0;
+}
+
+/* Per-ranker thread argument and result */
+typedef struct {
+    mnemon_storage_t     *storage;
+    const mnemon_query_t *query;
+    const float          *query_emb;
+    int                   dimensions;
+    fusion_entry_t       *fusion;
+    int                  *fusion_count;
+    int                   fusion_capacity;
+    pthread_mutex_t      *fusion_mutex;
+    mnemon_err_t          err;
+} ranker_arg_t;
+
+/* Vector ranker thread function */
+static void *vector_ranker_fn(void *arg)
+{
+    ranker_arg_t *ra = (ranker_arg_t *)arg;
+    ra->err = MNEMON_OK;
+
+    if (!ra->query_emb) return NULL;
+
+    mnemon_vector_t *vec = mnemon_storage_vector(ra->storage);
+    mnemon_vector_results_t vr;
+    memset(&vr, 0, sizeof(vr));
+
+    ra->err = mnemon_vector_search(vec, ra->query_emb, ra->dimensions,
+                                   MAX_RANKER_RESULTS, false, &vr);
+    if (ra->err == MNEMON_OK && vr.count > 0) {
+        pthread_mutex_lock(ra->fusion_mutex);
+        for (int i = 0; i < vr.count; i++) {
+            fusion_entry_t *fe = fusion_find_or_insert(
+                ra->fusion, ra->fusion_count, ra->fusion_capacity,
+                vr.results[i].id);
+            if (fe) {
+                fe->vector_rank = i + 1;
+                fe->vector_score = 1.0f - vr.results[i].distance;
+            }
+        }
+        pthread_mutex_unlock(ra->fusion_mutex);
+        mnemon_vector_results_free(&vr);
+    }
+    return NULL;
+}
+
+/* Keyword ranker thread function */
+static void *keyword_ranker_fn(void *arg)
+{
+    ranker_arg_t *ra = (ranker_arg_t *)arg;
+    ra->err = MNEMON_OK;
+
+    if (!ra->query->query_text) return NULL;
+
+    mnemon_fts_t *fts = mnemon_storage_fts(ra->storage);
+    mnemon_fts_results_t fr;
+    memset(&fr, 0, sizeof(fr));
+
+    ra->err = mnemon_fts_search(fts, ra->query->query_text,
+                                MAX_RANKER_RESULTS, &fr);
+    if (ra->err == MNEMON_OK && fr.count > 0) {
+        pthread_mutex_lock(ra->fusion_mutex);
+        for (int i = 0; i < fr.count; i++) {
+            if (fr.results[i].source_type != 0)
+                continue; /* Skip entity results for memory search */
+            fusion_entry_t *fe = fusion_find_or_insert(
+                ra->fusion, ra->fusion_count, ra->fusion_capacity,
+                fr.results[i].id);
+            if (fe) {
+                fe->keyword_rank = i + 1;
+                fe->keyword_score = fr.results[i].score;
+            }
+        }
+        pthread_mutex_unlock(ra->fusion_mutex);
+        mnemon_fts_results_free(&fr);
+    }
+    return NULL;
+}
+
+/* Graph ranker thread function */
+static void *graph_ranker_fn(void *arg)
+{
+    ranker_arg_t *ra = (ranker_arg_t *)arg;
+    ra->err = MNEMON_OK;
+
+    if (!ra->query_emb) return NULL;
+
+    /* Search entity vector index for semantically relevant entities */
+    mnemon_vector_t *vec = mnemon_storage_vector(ra->storage);
+    mnemon_vector_results_t er;
+    memset(&er, 0, sizeof(er));
+
+    ra->err = mnemon_vector_search(vec, ra->query_emb, ra->dimensions,
+                                   5, true, &er);
+    if (ra->err == MNEMON_OK && er.count > 0) {
+        /* BFS from top entities to find related memories */
+        mnemon_graph_t *graph = mnemon_storage_graph(ra->storage);
+        MDB_txn *txn;
+        ra->err = mnemon_graph_txn_begin(graph, MDB_RDONLY, &txn);
+        if (ra->err == MNEMON_OK) {
+            int graph_rank = 1;
+            for (int ei = 0; ei < er.count; ei++) {
+                /* Get edges from this entity to find connected memories */
+                mnemon_edge_list_t edges;
+                memset(&edges, 0, sizeof(edges));
+                mnemon_err_t edge_err = mnemon_graph_get_edges_from(
+                    graph, txn, er.results[ei].id, NULL, &edges);
+                if (edge_err == MNEMON_OK) {
+                    pthread_mutex_lock(ra->fusion_mutex);
+                    for (uint32_t j = 0; j < edges.count && graph_rank <= MAX_RANKER_RESULTS; j++) {
+                        fusion_entry_t *fe = fusion_find_or_insert(
+                            ra->fusion, ra->fusion_count, ra->fusion_capacity,
+                            edges.edges[j].target_id);
+                        if (fe && fe->graph_rank == 0) {
+                            fe->graph_rank = graph_rank++;
+                            fe->graph_score = 1.0f / (float)(ei + 1);
+                        }
+                    }
+                    pthread_mutex_unlock(ra->fusion_mutex);
+                    mnemon_edge_list_free(&edges);
+                }
+            }
+            mnemon_graph_txn_abort(txn);
+        }
+        mnemon_vector_results_free(&er);
+    }
+    return NULL;
 }
 
 /* Populate result set from fusion table.
@@ -183,92 +313,74 @@ mnemon_err_t mnemon_search_hybrid(mnemon_storage_t *s,
     }
     int fusion_count = 0;
 
-    /* --- Ranker 1: Vector search (memory index) --- */
-    if (query_emb) {
-        mnemon_vector_t *vec = mnemon_storage_vector(s);
-        mnemon_vector_results_t vr;
-        memset(&vr, 0, sizeof(vr));
+    /* --- Dispatch rankers in parallel --- */
+    pthread_mutex_t fusion_mutex;
+    pthread_mutex_init(&fusion_mutex, NULL);
 
-        err = mnemon_vector_search(vec, query_emb, dimensions,
-                                   MAX_RANKER_RESULTS, false, &vr);
-        if (err == MNEMON_OK && vr.count > 0) {
-            for (int i = 0; i < vr.count; i++) {
-                fusion_entry_t *fe = fusion_find_or_insert(
-                    fusion, &fusion_count, fusion_capacity,
-                    vr.results[i].id);
-                if (fe) {
-                    fe->vector_rank = i + 1;
-                    fe->vector_score = 1.0f - vr.results[i].distance;
-                }
-            }
-            mnemon_vector_results_free(&vr);
+    ranker_arg_t varg = {
+        .storage = s, .query = q, .query_emb = query_emb,
+        .dimensions = dimensions, .fusion = fusion,
+        .fusion_count = &fusion_count, .fusion_capacity = fusion_capacity,
+        .fusion_mutex = &fusion_mutex, .err = MNEMON_OK
+    };
+    ranker_arg_t karg = varg;
+    ranker_arg_t garg = varg;
+
+    /* Wrapper for reader pool task dispatch */
+    mnemon_reader_pool_t *pool = mnemon_storage_reader_pool(s);
+
+    if (pool) {
+        /* Use persistent reader pool */
+        reader_task_t vec_task = {0}, kw_task = {0};
+        bool vec_submitted = false, kw_submitted = false;
+
+        if (query_emb) {
+            vec_task.fn = (reader_task_fn)vector_ranker_fn;
+            vec_task.arg = &varg;
+            if (mnemon_reader_pool_submit(pool, &vec_task) == MNEMON_OK)
+                vec_submitted = true;
+            else
+                vector_ranker_fn(&varg);
         }
+        if (q->query_text) {
+            kw_task.fn = (reader_task_fn)keyword_ranker_fn;
+            kw_task.arg = &karg;
+            if (mnemon_reader_pool_submit(pool, &kw_task) == MNEMON_OK)
+                kw_submitted = true;
+            else
+                keyword_ranker_fn(&karg);
+        }
+
+        /* Run graph ranker on the calling thread */
+        graph_ranker_fn(&garg);
+
+        if (vec_submitted) mnemon_reader_task_wait(&vec_task);
+        if (kw_submitted)  mnemon_reader_task_wait(&kw_task);
+    } else {
+        /* Fallback: ad-hoc thread creation */
+        pthread_t vec_thread, kw_thread;
+        bool vec_started = false, kw_started = false;
+
+        if (query_emb) {
+            if (pthread_create(&vec_thread, NULL, vector_ranker_fn, &varg) == 0)
+                vec_started = true;
+            else
+                vector_ranker_fn(&varg);
+        }
+        if (q->query_text) {
+            if (pthread_create(&kw_thread, NULL, keyword_ranker_fn, &karg) == 0)
+                kw_started = true;
+            else
+                keyword_ranker_fn(&karg);
+        }
+
+        graph_ranker_fn(&garg);
+
+        if (vec_started) pthread_join(vec_thread, NULL);
+        if (kw_started)  pthread_join(kw_thread, NULL);
     }
 
-    /* --- Ranker 2: Keyword search (FTS5 BM25) --- */
-    if (q->query_text) {
-        mnemon_fts_t *fts = mnemon_storage_fts(s);
-        mnemon_fts_results_t fr;
-        memset(&fr, 0, sizeof(fr));
-
-        err = mnemon_fts_search(fts, q->query_text, MAX_RANKER_RESULTS, &fr);
-        if (err == MNEMON_OK && fr.count > 0) {
-            for (int i = 0; i < fr.count; i++) {
-                if (fr.results[i].source_type != 0)
-                    continue; /* Skip entity results for memory search */
-                fusion_entry_t *fe = fusion_find_or_insert(
-                    fusion, &fusion_count, fusion_capacity,
-                    fr.results[i].id);
-                if (fe) {
-                    fe->keyword_rank = i + 1;
-                    fe->keyword_score = fr.results[i].score;
-                }
-            }
-            mnemon_fts_results_free(&fr);
-        }
-    }
-
-    /* --- Ranker 3: Graph ranker --- */
-    if (query_emb) {
-        /* Search entity vector index for semantically relevant entities */
-        mnemon_vector_t *vec = mnemon_storage_vector(s);
-        mnemon_vector_results_t er;
-        memset(&er, 0, sizeof(er));
-
-        err = mnemon_vector_search(vec, query_emb, dimensions,
-                                   5, true, &er);
-        if (err == MNEMON_OK && er.count > 0) {
-            /* BFS from top entities to find related memories */
-            mnemon_graph_t *graph = mnemon_storage_graph(s);
-            MDB_txn *txn;
-            err = mnemon_graph_txn_begin(graph, MDB_RDONLY, &txn);
-            if (err == MNEMON_OK) {
-                int graph_rank = 1;
-                for (int ei = 0; ei < er.count; ei++) {
-                    /* Get edges from this entity to find connected memories */
-                    mnemon_edge_list_t edges;
-                    memset(&edges, 0, sizeof(edges));
-                    err = mnemon_graph_get_edges_from(graph, txn,
-                                                      er.results[ei].id,
-                                                      NULL, &edges);
-                    if (err == MNEMON_OK) {
-                        for (uint32_t j = 0; j < edges.count && graph_rank <= MAX_RANKER_RESULTS; j++) {
-                            fusion_entry_t *fe = fusion_find_or_insert(
-                                fusion, &fusion_count, fusion_capacity,
-                                edges.edges[j].target_id);
-                            if (fe && fe->graph_rank == 0) {
-                                fe->graph_rank = graph_rank++;
-                                fe->graph_score = 1.0f / (float)(ei + 1);
-                            }
-                        }
-                        mnemon_edge_list_free(&edges);
-                    }
-                }
-                mnemon_graph_txn_abort(txn);
-            }
-            mnemon_vector_results_free(&er);
-        }
-    }
+    pthread_mutex_destroy(&fusion_mutex);
 
     /* --- RRF Fusion --- */
     for (int i = 0; i < fusion_count; i++) {

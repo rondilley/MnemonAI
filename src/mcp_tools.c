@@ -16,6 +16,7 @@
 #include <string.h>
 #include <dirent.h>
 #include <sys/stat.h>
+#include <pthread.h>
 
 #include "mcp_tools.h"
 #include "storage.h"
@@ -120,6 +121,19 @@ static cJSON *tool_store_memory(mnemon_storage_t *s, const cJSON *params)
         cJSON *e = cJSON_CreateObject();
         cJSON_AddStringToObject(e, "error", "secret detected in content");
         return e;
+    }
+
+    /* Injection scanning via honeypot module */
+    mnemon_honeypot_t *hp = mnemon_storage_honeypot(s);
+    if (hp) {
+        float injection_score = mnemon_honeypot_scan_injection(
+            hp, content, strlen(content));
+        if (injection_score >= 7.0f) {
+            cJSON *e = cJSON_CreateObject();
+            cJSON_AddStringToObject(e, "error",
+                "content blocked: high prompt injection score");
+            return e;
+        }
     }
 
     mnemon_memory_t mem;
@@ -876,6 +890,134 @@ static cJSON *tool_import_file(mnemon_storage_t *s, const cJSON *params)
     return result;
 }
 
+/* Forward declaration */
+#define IMPORT_MAX_DEPTH 16
+static void import_dir_walk(mnemon_storage_t *s, const char *dirpath,
+                            const char *pattern, const char *format,
+                            const mnemon_import_opts_t *opts,
+                            bool recursive, int depth,
+                            int *files_processed, int *files_skipped,
+                            int *total_imported);
+
+/* ---- Background import job tracking ---- */
+
+#define MAX_IMPORT_JOBS 16
+
+typedef enum {
+    IMPORT_JOB_RUNNING,
+    IMPORT_JOB_COMPLETE,
+    IMPORT_JOB_FAILED
+} import_job_status_t;
+
+typedef struct {
+    char               id[37];
+    char               path[4096];
+    import_job_status_t status;
+    int                files_processed;
+    int                files_skipped;
+    int                total_imported;
+    int64_t            start_time;
+    int64_t            end_time;
+    pthread_t          thread;
+    bool               active;
+    /* Thread args (owned by job, freed after thread completes) */
+    mnemon_storage_t  *storage;
+    char               pattern[256];
+    char               format[64];
+    mnemon_import_opts_t opts;
+    bool               recursive;
+    /* Owned strings for opts fields */
+    char               opts_source_type[128];
+    char               opts_chunking[64];
+} import_job_t;
+
+static import_job_t  g_import_jobs[MAX_IMPORT_JOBS];
+static pthread_mutex_t g_import_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+static void *import_job_thread(void *arg)
+{
+    import_job_t *job = (import_job_t *)arg;
+    import_dir_walk(job->storage, job->path, job->pattern, job->format,
+                    &job->opts, job->recursive, 0,
+                    &job->files_processed, &job->files_skipped,
+                    &job->total_imported);
+    job->end_time = mnemon_time_ms();
+    job->status = IMPORT_JOB_COMPLETE;
+    return NULL;
+}
+
+/* Match filename against simple glob pattern ("*" or "*.ext") */
+static bool glob_match(const char *pattern, const char *name)
+{
+    if (strcmp(pattern, "*") == 0) return true;
+    const char *star = strchr(pattern, '*');
+    if (star && star == pattern) {
+        const char *suffix = star + 1;
+        size_t slen = strlen(suffix);
+        size_t nlen = strlen(name);
+        return (nlen >= slen && strcmp(name + nlen - slen, suffix) == 0);
+    }
+    return strcmp(pattern, name) == 0;
+}
+
+/* Recursive directory walker */
+static void import_dir_walk(mnemon_storage_t *s, const char *dirpath,
+                            const char *pattern, const char *format,
+                            const mnemon_import_opts_t *opts,
+                            bool recursive, int depth,
+                            int *files_processed, int *files_skipped,
+                            int *total_imported)
+{
+    if (depth > IMPORT_MAX_DEPTH) return;
+
+    DIR *dir = opendir(dirpath);
+    if (!dir) return;
+
+    struct dirent *entry;
+    while ((entry = readdir(dir)) != NULL) {
+        if (entry->d_name[0] == '.') continue;
+
+        char filepath[4096];
+        snprintf(filepath, sizeof(filepath), "%s/%s", dirpath, entry->d_name);
+
+        struct stat st;
+        if (stat(filepath, &st) != 0) {
+            (*files_skipped)++;
+            continue;
+        }
+
+        if (S_ISDIR(st.st_mode)) {
+            if (recursive) {
+                import_dir_walk(s, filepath, pattern, format, opts,
+                                true, depth + 1,
+                                files_processed, files_skipped,
+                                total_imported);
+            }
+            continue;
+        }
+
+        if (!S_ISREG(st.st_mode)) {
+            (*files_skipped)++;
+            continue;
+        }
+
+        if (!glob_match(pattern, entry->d_name)) {
+            (*files_skipped)++;
+            continue;
+        }
+
+        mnemon_import_result_t r = {0};
+        if (mnemon_import_file(s, filepath, format, opts, &r) == MNEMON_OK) {
+            *total_imported += r.imported;
+            (*files_processed)++;
+        } else {
+            (*files_skipped)++;
+        }
+    }
+
+    closedir(dir);
+}
+
 static cJSON *tool_import_directory(mnemon_storage_t *s, const cJSON *params)
 {
     const char *path = json_str(params, "path", NULL);
@@ -891,65 +1033,90 @@ static cJSON *tool_import_directory(mnemon_storage_t *s, const cJSON *params)
         return e;
     }
 
-    /* Walk directory and import each file */
+    /* Verify directory exists */
     DIR *dir = opendir(path);
     if (!dir) {
         cJSON *e = cJSON_CreateObject();
         cJSON_AddStringToObject(e, "error", "cannot open directory");
         return e;
     }
+    closedir(dir);
 
     const char *pattern = json_str(params, "pattern", "*");
     const char *format = json_str(params, "format", "auto");
     bool recursive = json_bool(params, "recursive", false);
-    (void)recursive; /* Phase 1: non-recursive only */
+    bool async = json_bool(params, "async", false);
 
     mnemon_import_opts_t opts = {0};
-    opts.source_type = json_str(params, "source_type", "document");
-    opts.chunking = json_str(params, "chunking", "paragraph");
+    const char *source_type = json_str(params, "source_type", "document");
+    const char *chunking = json_str(params, "chunking", "paragraph");
+    opts.source_type = source_type;
+    opts.chunking = chunking;
     opts.max_chunk_size = json_int(params, "max_chunk_size", 4096);
 
+    if (async) {
+        /* Launch background import job */
+        pthread_mutex_lock(&g_import_mutex);
+        import_job_t *job = NULL;
+        for (int i = 0; i < MAX_IMPORT_JOBS; i++) {
+            if (!g_import_jobs[i].active) {
+                job = &g_import_jobs[i];
+                break;
+            }
+        }
+        if (!job) {
+            pthread_mutex_unlock(&g_import_mutex);
+            cJSON *e = cJSON_CreateObject();
+            cJSON_AddStringToObject(e, "error",
+                "max concurrent import jobs reached");
+            return e;
+        }
+
+        memset(job, 0, sizeof(*job));
+        job->active = true;
+        job->status = IMPORT_JOB_RUNNING;
+        job->storage = s;
+        job->recursive = recursive;
+        job->start_time = mnemon_time_ms();
+        snprintf(job->path, sizeof(job->path), "%s", path);
+        snprintf(job->pattern, sizeof(job->pattern), "%s", pattern);
+        snprintf(job->format, sizeof(job->format), "%s", format);
+        snprintf(job->opts_source_type, sizeof(job->opts_source_type),
+                 "%s", source_type);
+        snprintf(job->opts_chunking, sizeof(job->opts_chunking),
+                 "%s", chunking);
+        job->opts.source_type = job->opts_source_type;
+        job->opts.chunking = job->opts_chunking;
+        job->opts.max_chunk_size = opts.max_chunk_size;
+
+        /* Generate job ID */
+        mnemon_uuid_t uuid;
+        mnemon_uuid_generate(&uuid);
+        mnemon_uuid_to_string(&uuid, job->id, sizeof(job->id));
+
+        if (pthread_create(&job->thread, NULL, import_job_thread, job) != 0) {
+            job->active = false;
+            pthread_mutex_unlock(&g_import_mutex);
+            cJSON *e = cJSON_CreateObject();
+            cJSON_AddStringToObject(e, "error", "failed to start import thread");
+            return e;
+        }
+        pthread_detach(job->thread);
+        pthread_mutex_unlock(&g_import_mutex);
+
+        cJSON *result = cJSON_CreateObject();
+        cJSON_AddStringToObject(result, "job_id", job->id);
+        cJSON_AddStringToObject(result, "status", "running");
+        cJSON_AddStringToObject(result, "path", path);
+        return result;
+    }
+
+    /* Synchronous import */
     int files_processed = 0, files_skipped = 0, total_imported = 0;
     int64_t start = mnemon_time_ms();
 
-    struct dirent *entry;
-    while ((entry = readdir(dir)) != NULL) {
-        if (entry->d_name[0] == '.') continue;
-
-        /* Simple glob: "*" matches all, "*.ext" matches suffix */
-        if (strcmp(pattern, "*") != 0) {
-            const char *star = strchr(pattern, '*');
-            if (star && star == pattern) {
-                /* *.ext pattern */
-                const char *suffix = star + 1;
-                size_t slen = strlen(suffix);
-                size_t nlen = strlen(entry->d_name);
-                if (nlen < slen || strcmp(entry->d_name + nlen - slen, suffix) != 0) {
-                    files_skipped++;
-                    continue;
-                }
-            }
-        }
-
-        char filepath[4096];
-        snprintf(filepath, sizeof(filepath), "%s/%s", path, entry->d_name);
-
-        struct stat st;
-        if (stat(filepath, &st) != 0 || !S_ISREG(st.st_mode)) {
-            files_skipped++;
-            continue;
-        }
-
-        mnemon_import_result_t r = {0};
-        if (mnemon_import_file(s, filepath, format, &opts, &r) == MNEMON_OK) {
-            total_imported += r.imported;
-            files_processed++;
-        } else {
-            files_skipped++;
-        }
-    }
-
-    closedir(dir);
+    import_dir_walk(s, path, pattern, format, &opts, recursive, 0,
+                    &files_processed, &files_skipped, &total_imported);
 
     cJSON *result = cJSON_CreateObject();
     cJSON_AddNumberToObject(result, "files_processed", files_processed);
@@ -962,12 +1129,42 @@ static cJSON *tool_import_directory(mnemon_storage_t *s, const cJSON *params)
 static cJSON *tool_get_import_status(mnemon_storage_t *s, const cJSON *params)
 {
     (void)s;
-    (void)params;
-    /* Phase 1: imports are synchronous, no background jobs to track */
+    const char *job_id = json_str(params, "job_id", NULL);
+
     cJSON *result = cJSON_CreateObject();
     cJSON *jobs = cJSON_CreateArray();
+
+    pthread_mutex_lock(&g_import_mutex);
+    for (int i = 0; i < MAX_IMPORT_JOBS; i++) {
+        import_job_t *job = &g_import_jobs[i];
+        if (!job->active) continue;
+
+        /* If filtering by job_id, skip non-matching */
+        if (job_id && strcmp(job->id, job_id) != 0) continue;
+
+        cJSON *j = cJSON_CreateObject();
+        cJSON_AddStringToObject(j, "job_id", job->id);
+        cJSON_AddStringToObject(j, "path", job->path);
+        switch (job->status) {
+        case IMPORT_JOB_RUNNING:  cJSON_AddStringToObject(j, "status", "running"); break;
+        case IMPORT_JOB_COMPLETE: cJSON_AddStringToObject(j, "status", "complete"); break;
+        case IMPORT_JOB_FAILED:   cJSON_AddStringToObject(j, "status", "failed"); break;
+        }
+        cJSON_AddNumberToObject(j, "files_processed", job->files_processed);
+        cJSON_AddNumberToObject(j, "files_skipped", job->files_skipped);
+        cJSON_AddNumberToObject(j, "memories_imported", job->total_imported);
+        if (job->end_time > 0)
+            cJSON_AddNumberToObject(j, "duration_ms",
+                (double)(job->end_time - job->start_time));
+        cJSON_AddItemToArray(jobs, j);
+
+        /* Garbage collect completed jobs after reporting */
+        if (job->status != IMPORT_JOB_RUNNING && job_id)
+            job->active = false;
+    }
+    pthread_mutex_unlock(&g_import_mutex);
+
     cJSON_AddItemToObject(result, "jobs", jobs);
-    cJSON_AddStringToObject(result, "note", "imports are synchronous in Phase 1");
     return result;
 }
 

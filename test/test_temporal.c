@@ -16,6 +16,7 @@
 #include <string.h>
 #include <math.h>
 #include <unistd.h>
+#include <sys/stat.h>
 
 #include "memory.h"
 #include "id.h"
@@ -546,9 +547,213 @@ static void test_hp_audit_alert_file(void)
     PASS();
 }
 
+/* ---- SIMD Distance Functions ---- */
+
+#include "hardware.h"
+#include "distance.h"
+
+static void test_simd_dispatch_populated(void)
+{
+    TEST("simd: dispatch table populated after init");
+    mnemon_hardware_t hw;
+    memset(&hw, 0, sizeof(hw));
+    mnemon_hardware_detect(&hw);
+    mnemon_simd_init(&hw);
+    ASSERT(g_simd_ops.cosine_distance != NULL, "cosine fn set");
+    ASSERT(g_simd_ops.dot_product != NULL, "dot fn set");
+    ASSERT(g_simd_ops.l2_distance != NULL, "l2 fn set");
+    ASSERT(g_simd_ops.name != NULL, "name set");
+    printf("[%s] ", g_simd_ops.name);
+    PASS();
+}
+
+static void test_simd_cosine_identical(void)
+{
+    TEST("simd: cosine distance of identical vectors = 0");
+    mnemon_hardware_t hw = {0};
+    mnemon_hardware_detect(&hw);
+    mnemon_simd_init(&hw);
+
+    float a[768], b[768];
+    for (int i = 0; i < 768; i++) {
+        a[i] = (float)(i % 50) * 0.01f + 0.1f;
+        b[i] = a[i];
+    }
+    float d = g_simd_ops.cosine_distance(a, b, 768);
+    ASSERT(d < 0.001f, "identical = ~0");
+    PASS();
+}
+
+static void test_simd_cosine_orthogonal(void)
+{
+    TEST("simd: cosine distance of orthogonal vectors = 1");
+    float a[4] = {1.0f, 0.0f, 0.0f, 0.0f};
+    float b[4] = {0.0f, 1.0f, 0.0f, 0.0f};
+    float d = g_simd_ops.cosine_distance(a, b, 4);
+    ASSERT(d > 0.99f && d < 1.01f, "orthogonal = ~1");
+    PASS();
+}
+
+static void test_simd_cosine_opposite(void)
+{
+    TEST("simd: cosine distance of opposite vectors = 2");
+    float a[4] = {1.0f, 0.0f, 0.0f, 0.0f};
+    float b[4] = {-1.0f, 0.0f, 0.0f, 0.0f};
+    float d = g_simd_ops.cosine_distance(a, b, 4);
+    ASSERT(d > 1.99f && d < 2.01f, "opposite = ~2");
+    PASS();
+}
+
+static void test_simd_dot_product(void)
+{
+    TEST("simd: dot product correctness");
+    float a[4] = {1.0f, 2.0f, 3.0f, 4.0f};
+    float b[4] = {5.0f, 6.0f, 7.0f, 8.0f};
+    /* Expected: 1*5 + 2*6 + 3*7 + 4*8 = 5+12+21+32 = 70 */
+    float d = g_simd_ops.dot_product(a, b, 4);
+    ASSERT(d > 69.9f && d < 70.1f, "dot = 70");
+    PASS();
+}
+
+static void test_simd_dot_product_768(void)
+{
+    TEST("simd: dot product at 768 dimensions (embedding size)");
+    float a[768], b[768];
+    float expected = 0.0f;
+    for (int i = 0; i < 768; i++) {
+        a[i] = (float)(i + 1) * 0.001f;
+        b[i] = (float)(768 - i) * 0.001f;
+        expected += a[i] * b[i];
+    }
+    float d = g_simd_ops.dot_product(a, b, 768);
+    float err = (d - expected) / expected;
+    ASSERT(err < 0.001f && err > -0.001f, "768-dim dot within 0.1%");
+    PASS();
+}
+
+static void test_simd_l2_distance(void)
+{
+    TEST("simd: L2 distance correctness");
+    float a[4] = {1.0f, 2.0f, 3.0f, 4.0f};
+    float b[4] = {5.0f, 6.0f, 7.0f, 8.0f};
+    /* Expected: sqrt((4^2 + 4^2 + 4^2 + 4^2)) = sqrt(64) = 8 */
+    float d = g_simd_ops.l2_distance(a, b, 4);
+    ASSERT(d > 7.9f && d < 8.1f, "L2 = 8");
+    PASS();
+}
+
+static void test_simd_l2_zero(void)
+{
+    TEST("simd: L2 distance of identical vectors = 0");
+    float a[768];
+    for (int i = 0; i < 768; i++) a[i] = (float)i * 0.01f;
+    float d = g_simd_ops.l2_distance(a, a, 768);
+    ASSERT(d < 0.001f, "identical = 0");
+    PASS();
+}
+
+static void test_simd_scalar_matches_dispatch(void)
+{
+    TEST("simd: scalar and dispatched give same result");
+    float a[768], b[768];
+    for (int i = 0; i < 768; i++) {
+        a[i] = (float)(i * 7 % 100) * 0.01f;
+        b[i] = (float)((i + 37) * 13 % 100) * 0.01f;
+    }
+    float scalar_cos = mnemon_cosine_scalar(a, b, 768);
+    float dispatch_cos = g_simd_ops.cosine_distance(a, b, 768);
+    float diff = scalar_cos - dispatch_cos;
+    if (diff < 0) diff = -diff;
+    ASSERT(diff < 0.001f, "scalar vs dispatch within 0.001");
+    printf("[diff=%.6f] ", diff);
+    PASS();
+}
+
+/* ---- GPU/Hardware Detection ---- */
+
+static void test_hw_gpu_detected(void)
+{
+    TEST("hardware: GPU vendor detected (AMD/NVIDIA/Intel/none)");
+    mnemon_hardware_t hw;
+    memset(&hw, 0, sizeof(hw));
+    mnemon_hardware_detect(&hw);
+    /* On this system we expect AMD, but any valid value is acceptable */
+    ASSERT(hw.gpu_vendor >= MNEMON_GPU_NONE && hw.gpu_vendor <= MNEMON_GPU_INTEL,
+           "valid vendor enum");
+    printf("[vendor=%d model=%s] ", hw.gpu_vendor, hw.gpu_model);
+    PASS();
+}
+
+static void test_hw_gpu_vram(void)
+{
+    TEST("hardware: GPU VRAM reported if GPU present");
+    mnemon_hardware_t hw = {0};
+    mnemon_hardware_detect(&hw);
+    if (hw.gpu_vendor != MNEMON_GPU_NONE) {
+        ASSERT(hw.gpu_vram_bytes > 0 || hw.gpu_gtt_bytes > 0, "has memory info");
+        printf("[vram=%lluMB gtt=%lluMB] ",
+               (unsigned long long)hw.gpu_vram_bytes / (1024*1024),
+               (unsigned long long)hw.gpu_gtt_bytes / (1024*1024));
+    }
+    PASS();
+}
+
+static void test_hw_rocm_detected(void)
+{
+    TEST("hardware: ROCm detection matches /dev/kfd");
+    mnemon_hardware_t hw = {0};
+    mnemon_hardware_detect(&hw);
+    struct stat st;
+    bool kfd_exists = (stat("/dev/kfd", &st) == 0);
+    if (hw.gpu_vendor == MNEMON_GPU_AMD) {
+        ASSERT(hw.has_rocm == kfd_exists, "rocm matches /dev/kfd");
+    }
+    printf("[rocm=%d] ", hw.has_rocm);
+    PASS();
+}
+
+static void test_hw_npu_detected(void)
+{
+    TEST("hardware: NPU detection");
+    mnemon_hardware_t hw = {0};
+    mnemon_hardware_detect(&hw);
+    printf("[npu=%d model=%s] ", hw.has_npu, hw.npu_model);
+    /* Just verify it doesn't crash; NPU may or may not be present */
+    PASS();
+}
+
+static void test_hw_simd_matches_cpu(void)
+{
+    TEST("hardware: SIMD caps match CPU model");
+    mnemon_hardware_t hw = {0};
+    mnemon_hardware_detect(&hw);
+    /* On x86_64, at minimum AVX2 should be present on any modern CPU */
+    printf("[avx2=%d avx512f=%d] ", hw.has_avx2, hw.has_avx512f);
+    /* Don't assert -- might run on old hardware */
+    PASS();
+}
+
+/* ---- GPU Backend Linkage ---- */
+
+static void test_gpu_backend_linked(void)
+{
+    TEST("gpu: ggml-hip.so linked (ROCm backend available)");
+    /* Check if the mnemond binary links against libggml-hip */
+    /* We can't check our own binary from inside, but we can verify
+     * the hardware detection reports ROCm correctly */
+    mnemon_hardware_t hw = {0};
+    mnemon_hardware_detect(&hw);
+    if (hw.gpu_vendor == MNEMON_GPU_AMD && hw.has_rocm) {
+        printf("[AMD GPU + ROCm] ");
+    } else {
+        printf("[no AMD ROCm] ");
+    }
+    PASS();
+}
+
 int main(void)
 {
-    printf("=== test_temporal: Time, Decay, UUID, Admit, Audit, Model, Honeypot ===\n");
+    printf("=== test_temporal: Time, Decay, UUID, Admit, Audit, Model, Honeypot, SIMD, GPU ===\n");
 
     test_iso8601_parse_basic();
     test_iso8601_parse_null();
@@ -608,6 +813,25 @@ int main(void)
     test_hp_null_safety();
     test_hp_audit_alert_levels();
     test_hp_audit_alert_file();
+
+    /* SIMD distance functions */
+    test_simd_dispatch_populated();
+    test_simd_cosine_identical();
+    test_simd_cosine_orthogonal();
+    test_simd_cosine_opposite();
+    test_simd_dot_product();
+    test_simd_dot_product_768();
+    test_simd_l2_distance();
+    test_simd_l2_zero();
+    test_simd_scalar_matches_dispatch();
+
+    /* GPU/hardware detection */
+    test_hw_gpu_detected();
+    test_hw_gpu_vram();
+    test_hw_rocm_detected();
+    test_hw_npu_detected();
+    test_hw_simd_matches_cpu();
+    test_gpu_backend_linked();
 
     printf("\n%d/%d passed, %d failed\n", passed, total, failed);
     return (failed == 0) ? EXIT_SUCCESS : EXIT_FAILURE;

@@ -85,6 +85,8 @@ static void set_defaults(mnemon_config_t *cfg)
     cfg->http_port = 3847;
     cfg->http_max_connections = 32;
     cfg->http_auth_token = NULL;
+    cfg->tls_cert = NULL;
+    cfg->tls_key = NULL;
 }
 
 static void set_value(mnemon_config_t *cfg, const char *section,
@@ -150,6 +152,8 @@ static void set_value(mnemon_config_t *cfg, const char *section,
             free(cfg->http_auth_token);
             cfg->http_auth_token = strdup(value);
         }
+        else if (strcmp(key, "tls_cert") == 0) STR_SET(tls_cert);
+        else if (strcmp(key, "tls_key") == 0) STR_SET(tls_key);
     }
 
     #undef STR_SET
@@ -249,6 +253,11 @@ mnemon_err_t mnemon_config_validate(const mnemon_config_t *cfg)
                        "max_top_k must be 1-200");
         return MNEMON_ERR_INVALID_INPUT;
     }
+    if ((cfg->tls_cert && !cfg->tls_key) || (!cfg->tls_cert && cfg->tls_key)) {
+        mnemon_err_set(MNEMON_ERR_INVALID_INPUT, 0,
+                       "tls_cert and tls_key must both be set or both unset");
+        return MNEMON_ERR_INVALID_INPUT;
+    }
     return MNEMON_OK;
 }
 
@@ -267,6 +276,8 @@ void mnemon_config_free(mnemon_config_t *cfg)
     FREE_FIELD(allowed_paths);
     FREE_FIELD(http_bind);
     FREE_FIELD(http_auth_token);
+    FREE_FIELD(tls_cert);
+    FREE_FIELD(tls_key);
     #undef FREE_FIELD
 
     free(cfg);

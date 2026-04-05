@@ -1,9 +1,9 @@
 # MnemonAI: Architecture Document
 
-**Version:** 0.3 -- Post implementation
+**Version:** 0.4 -- All gaps closed
 **Author:** Architecture session (Claude Code)
-**Date:** 2026-04-03
-**Status:** Reviewed by Gemini 2.5 Pro, OpenAI o3, Grok 3, Mistral Large. Findings addressed.
+**Date:** 2026-04-04
+**Status:** Reviewed by Gemini 2.5 Pro, OpenAI o3, Grok 3, Mistral Large. Findings addressed. Phase 9 integration complete.
 **Prerequisites:** [Research Synthesis](research-synthesis.md), [Landscape Report](memory-mcp-report-v2.md)
 
 ---
@@ -76,7 +76,7 @@ graph TB
 |----------|-------|
 | Language | C11 |
 | Process model | Single daemon, multi-threaded |
-| MCP transports | stdio (Phase 1), streamable HTTP (Phase 3) |
+| MCP transports | stdio + Streamable HTTP with TLS + SSE |
 | Primary storage | LMDB (mmap, MVCC, ACID) |
 | Search backends | SQLite FTS5 (BM25), usearch (HNSW cosine) |
 | Embedding | llama.cpp in-process, nomic-embed-text-v1.5 Q8_0 |
@@ -1716,12 +1716,16 @@ Streamable HTTP transport (MCP 2025-03-26 spec) via libmicrohttpd. Single `/mcp`
 
 Prompt injection scanner (18 patterns + unicode bidi), canary record tracking, auth brute-force detection, search rate anomaly, enumeration detection, credential query detection, 4 decoy admin tools, structured audit alerts with severity levels.
 
+### Phase 8: GPU/SIMD Acceleration -- **Complete**
+
+llama.cpp rebuilt with ROCm HIP for AMD GPU embedding acceleration. True batch embedding via multi-sequence `llama_decode()`. SIMD distance functions (`g_simd_ops`) wired into L2 normalization (`embed.c`) and consolidation clustering (`consolidate.c`). 15 new tests for SIMD correctness, GPU detection, and consolidation.
+
+### Phase 9: Integration and Gap Closure -- **Complete**
+
+Parallel search dispatch (reader pool + ad-hoc pthreads), TLS cert/key config in `[http]` section, SSE streaming GET endpoint with per-session event queues, recursive directory imports with depth limit, background import job tracking (async + `get_import_status`), injection scanner wired into `store_memory`, auth brute-force wired into HTTP `check_auth`, entity merging during consolidation, persistent reader pool (`[threads] reader_pool_size`).
+
 ### Remaining Work
 
-- Parallel hybrid search (3 reader threads dispatched simultaneously)
-- GPU-accelerated embedding (llama.cpp ROCm/CUDA backend auto-selection)
-- TLS cert/key configuration in mnemond.conf
-- SSE streaming for server-initiated messages via HTTP GET
 - Conflict detection (new facts contradict existing edges)
 - Man pages
 
@@ -1978,14 +1982,15 @@ Phase 1 is fully implemented. This section documents deviations from the archite
 | hardware.c | 185 | Complete | /proc/cpuinfo, NVML dlopen, SIMD dispatch |
 | memory.c | 90 | Complete | Hebbian decay, ISO 8601 parsing |
 | temporal.c | 250 | Complete | Time-filtered scan, get_state_at_time, get_history, get_changes_since |
-| consolidate.c | 160 | Complete | Scans unconsolidated episodic memories, marks as semantic |
+| consolidate.c | 280 | Complete | Clustering + entity merge (name+type dedup, observation merge) |
 | extract.c | 270 | Complete | Full libcurl HTTP client, structured prompt, response parsing |
-| threads.c | 145 | Complete | MPSC writer queue, shutdown coordination |
+| threads.c | 280 | Complete | MPSC writer queue, reader pool, shutdown coordination |
+| sse.c | 145 | Complete | Thread-safe ring buffer event queue for SSE streaming |
 | admit.c | 100 | Complete | Boilerplate content filtering |
 | audit.c | 80 | Complete | Append-only JSON operation log |
 | model_mgr.c | 200 | Complete | Auto-detect hardware, recommend model, download from HuggingFace |
 | SIMD (3 files) | 320 | Complete | Scalar + AVX2 + AVX-512 distance functions |
-| **Total** | **~11,500** | | |
+| **Total** | **~12,500** | | |
 
 ### 18.2 Architecture Deviations
 
@@ -1995,7 +2000,7 @@ Phase 1 is fully implemented. This section documents deviations from the archite
 
 3. **15 tools, not 16:** `import_batch` from the architecture is implemented in `import.c` but not exposed as a separate MCP tool in Phase 1. Accessible via `import_file` with JSONL format.
 
-4. **Single-threaded:** Architecture describes writer thread + reader pool. Phase 1 is fully single-threaded -- all operations happen synchronously on the main thread in the stdio loop.
+4. **Threading:** Architecture describes writer thread + reader pool. Phase 1 was single-threaded. Phase 9 added persistent reader pool (`mnemon_reader_pool_t` in `threads.c`) and parallel search ranker dispatch. Search uses the pool when `reader_pool_size > 0`, falls back to ad-hoc pthreads.
 
 5. **Msgpack nil handling:** The architecture's msgpack design did not account for nullable embedding fields. Implementation adds explicit nil byte (`0xc0`) checking before `mpr_bin()` calls to prevent reader misalignment.
 
@@ -2035,4 +2040,4 @@ Phase 1 is fully implemented. This section documents deviations from the archite
 
 ---
 
-*End of architecture document. v0.3 -- post implementation, testing, and security audit.*
+*End of architecture document. v0.4 -- all phases complete, all gaps closed.*

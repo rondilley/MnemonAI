@@ -59,6 +59,8 @@ typedef struct mnemon_config {
     int      http_port;
     int      http_max_connections;
     char    *http_auth_token;
+    char    *tls_cert;
+    char    *tls_key;
 } mnemon_config_t;
 
 mnemon_err_t mnemon_config_load(const char *path, mnemon_config_t **out);

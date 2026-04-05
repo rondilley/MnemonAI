@@ -28,6 +28,10 @@
 # include <getopt.h>
 #endif
 
+#include <fcntl.h>
+#include <errno.h>
+#include <sys/stat.h>
+
 #include "mnemon.h"
 #include "config_parse.h"
 #include "log.h"
@@ -38,6 +42,8 @@
 #include "mcp_http.h"
 #include "mcp_dispatch.h"
 #include "threads.h"
+#include "honeypot.h"
+#include "audit.h"
 
 /* Long options */
 static struct option long_options[] = {
@@ -48,6 +54,7 @@ static struct option long_options[] = {
     {"rebuild-indexes", no_argument,       NULL, 'r'},
     {"no-gpu",          no_argument,       NULL, 'G'},
     {"check-config",    no_argument,       NULL, 'C'},
+    {"gen-key",         no_argument,       NULL, 'k'},
     {"version",         no_argument,       NULL, 'v'},
     {"help",            no_argument,       NULL, 'h'},
     {NULL,              0,                 NULL, 0}
@@ -80,6 +87,7 @@ static void print_usage(const char *progname)
         "  --rebuild-indexes   Rebuild FTS5 and usearch from LMDB, then exit\n"
         "  --no-gpu            Skip GPU detection\n"
         "  --check-config      Validate config and exit\n"
+        "  --gen-key           Generate MCP auth token and write to config\n"
         "  --version           Print version and exit\n"
         "  --help              Show this help\n"
         "\n"
@@ -137,6 +145,13 @@ static mnemon_log_level_t parse_log_level(const char *str)
     return MNEMON_LOG_INFO;
 }
 
+/* SSE broadcast notifier (adapts mnemon_notify_fn to mnemon_http_broadcast_event) */
+static void sse_notify_fn(void *ctx, const char *event_type,
+                           const char *json_data)
+{
+    mnemon_http_broadcast_event((mnemon_http_t *)ctx, event_type, json_data);
+}
+
 /* MCP stdio dispatch callback */
 static int stdio_read_request(void *ctx, cJSON **out)
 {
@@ -154,12 +169,231 @@ static int stdio_write_response(void *ctx, const cJSON *response)
     return -1;
 }
 
+/* Generate a 64-character hex token from 32 bytes of /dev/urandom */
+static int generate_auth_token(char *out, size_t outlen)
+{
+    if (outlen < 65) return -1;
+
+    unsigned char buf[32];
+    int fd = open("/dev/urandom", O_RDONLY);
+    if (fd < 0) return -1;
+
+    size_t got = 0;
+    while (got < sizeof(buf)) {
+        ssize_t n = read(fd, buf + got, sizeof(buf) - got);
+        if (n <= 0) { close(fd); return -1; }
+        got += (size_t)n;
+    }
+    close(fd);
+
+    static const char hex[] = "0123456789abcdef";
+    for (size_t i = 0; i < sizeof(buf); i++) {
+        out[i * 2]     = hex[buf[i] >> 4];
+        out[i * 2 + 1] = hex[buf[i] & 0x0f];
+    }
+    out[64] = '\0';
+    return 0;
+}
+
+/* Resolve the config file path using the same search order as config_load */
+static char *resolve_config_path(const char *explicit_path)
+{
+    if (explicit_path)
+        return strdup(explicit_path);
+
+    const char *xdg = getenv("XDG_CONFIG_HOME");
+    char path[512];
+    struct stat st;
+
+    if (xdg) {
+        snprintf(path, sizeof(path), "%s/mnemond/mnemond.conf", xdg);
+        if (stat(path, &st) == 0)
+            return strdup(path);
+    }
+
+    const char *home = getenv("HOME");
+    if (home) {
+        snprintf(path, sizeof(path), "%s/.config/mnemond/mnemond.conf", home);
+        if (stat(path, &st) == 0)
+            return strdup(path);
+    }
+
+    if (stat("/etc/mnemond/mnemond.conf", &st) == 0)
+        return strdup("/etc/mnemond/mnemond.conf");
+
+    /* No existing config; default to ~/.config/mnemond/mnemond.conf */
+    if (home) {
+        snprintf(path, sizeof(path), "%s/.config/mnemond/mnemond.conf", home);
+        return strdup(path);
+    }
+
+    return NULL;
+}
+
+/* Ensure parent directories exist for a file path */
+static int mkdirs(const char *filepath)
+{
+    char *tmp = strdup(filepath);
+    if (!tmp) return -1;
+
+    /* Find last slash to get directory portion */
+    char *slash = strrchr(tmp, '/');
+    if (!slash) { free(tmp); return 0; }
+    *slash = '\0';
+
+    /* Walk path components and mkdir as needed */
+    for (char *p = tmp + 1; *p; p++) {
+        if (*p == '/') {
+            *p = '\0';
+            mkdir(tmp, 0755);
+            *p = '/';
+        }
+    }
+    mkdir(tmp, 0755);
+    free(tmp);
+    return 0;
+}
+
+/*
+ * Write the auth_token into the config file.
+ * If the file exists, replace the auth_token line in [http].
+ * If no [http] section or no file, append/create as needed.
+ */
+static int write_key_to_config(const char *config_path, const char *token)
+{
+    char *content = NULL;
+    size_t content_len = 0;
+
+    /* Read existing config if present */
+    FILE *fp = fopen(config_path, "r");
+    if (fp) {
+        fseek(fp, 0, SEEK_END);
+        long sz = ftell(fp);
+        fseek(fp, 0, SEEK_SET);
+        if (sz > 0) {
+            content = malloc((size_t)sz + 1);
+            if (!content) { fclose(fp); return -1; }
+            content_len = fread(content, 1, (size_t)sz, fp);
+            content[content_len] = '\0';
+        }
+        fclose(fp);
+    }
+
+    /* Build the new auth_token line */
+    char new_line[128];
+    snprintf(new_line, sizeof(new_line), "auth_token = %s", token);
+
+    if (content && content_len > 0) {
+        /* Look for existing auth_token in [http] section */
+        char *http_section = strstr(content, "[http]");
+        if (http_section) {
+            char *auth_key = strstr(http_section, "auth_token");
+            /* Make sure we don't match past the next section */
+            char *next_section = strchr(http_section + 1, '[');
+            if (auth_key && (!next_section || auth_key < next_section)) {
+                /* Find end of line */
+                char *eol = strchr(auth_key, '\n');
+                size_t old_line_len = eol ? (size_t)(eol - auth_key) : strlen(auth_key);
+                size_t new_line_len = strlen(new_line);
+
+                size_t new_size = content_len - old_line_len + new_line_len + 1;
+                char *result = malloc(new_size);
+                if (!result) { free(content); return -1; }
+
+                size_t prefix_len = (size_t)(auth_key - content);
+                memcpy(result, content, prefix_len);
+                memcpy(result + prefix_len, new_line, new_line_len);
+                if (eol) {
+                    size_t suffix_len = content_len - prefix_len - old_line_len;
+                    memcpy(result + prefix_len + new_line_len,
+                           eol, suffix_len);
+                }
+                result[new_size - 1] = '\0';
+
+                mkdirs(config_path);
+                fp = fopen(config_path, "w");
+                if (!fp) { free(result); free(content); return -1; }
+                fputs(result, fp);
+                fclose(fp);
+                free(result);
+                free(content);
+                return 0;
+            }
+            /* [http] exists but no auth_token line -- insert before next section or at end */
+            size_t insert_pos;
+            if (next_section)
+                insert_pos = (size_t)(next_section - content);
+            else
+                insert_pos = content_len;
+
+            /* Back up past trailing whitespace to insert cleanly */
+            while (insert_pos > 0 && (content[insert_pos - 1] == '\n' || content[insert_pos - 1] == ' '))
+                insert_pos--;
+            insert_pos++; /* keep one newline */
+
+            size_t tail_len = content_len - insert_pos;
+            size_t new_line_len = strlen(new_line);
+            size_t new_size = insert_pos + new_line_len + 1 + tail_len + (next_section ? 1 : 0) + 1;
+            char *result = malloc(new_size);
+            if (!result) { free(content); return -1; }
+
+            size_t pos = 0;
+            memcpy(result + pos, content, insert_pos); pos += insert_pos;
+            memcpy(result + pos, new_line, new_line_len); pos += new_line_len;
+            result[pos++] = '\n';
+            if (next_section && tail_len > 0) {
+                result[pos++] = '\n';
+            }
+            if (tail_len > 0) {
+                memcpy(result + pos, content + insert_pos, tail_len);
+                pos += tail_len;
+            }
+            result[pos] = '\0';
+
+            mkdirs(config_path);
+            fp = fopen(config_path, "w");
+            if (!fp) { free(result); free(content); return -1; }
+            fputs(result, fp);
+            fclose(fp);
+            free(result);
+            free(content);
+            return 0;
+        }
+        /* No [http] section -- append one */
+        mkdirs(config_path);
+        fp = fopen(config_path, "w");
+        if (!fp) { free(content); return -1; }
+        fputs(content, fp);
+        if (content_len > 0 && content[content_len - 1] != '\n')
+            fputc('\n', fp);
+        fprintf(fp, "\n[http]\n%s\n", new_line);
+        fclose(fp);
+        free(content);
+        return 0;
+    }
+
+    /* No existing file or empty -- create minimal config */
+    free(content);
+    mkdirs(config_path);
+    fp = fopen(config_path, "w");
+    if (!fp) return -1;
+    fprintf(fp,
+        "# mnemond.conf -- generated by mnemond --gen-key\n"
+        "\n"
+        "[http]\n"
+        "enabled = true\n"
+        "%s\n", new_line);
+    fclose(fp);
+    return 0;
+}
+
 int main(int argc, char *argv[])
 {
     const char *config_path = NULL;
     run_mode_t mode = MODE_STDIO;
     bool rebuild_indexes = false;
     bool check_config = false;
+    bool gen_key = false;
     bool no_gpu = false;
     int opt;
 
@@ -167,12 +401,15 @@ int main(int argc, char *argv[])
     mnemon_http_t *http = NULL;
     mnemon_storage_t *storage = NULL;
     mnemon_dispatch_t *dispatch = NULL;
+    mnemon_honeypot_t *honeypot = NULL;
+    mnemon_reader_pool_t reader_pool_inst;
+    mnemon_reader_pool_t *reader_pool = NULL;
     mnemon_hardware_t hw;
     mnemon_err_t err;
     int exit_code = EXIT_SUCCESS;
 
     /* Parse command-line arguments */
-    while ((opt = getopt_long(argc, argv, "sdfc:rGCvh", long_options, NULL)) != -1) {
+    while ((opt = getopt_long(argc, argv, "sdfc:rGCkvh", long_options, NULL)) != -1) {
         switch (opt) {
         case 's': mode = MODE_STDIO; break;
         case 'd': mode = MODE_DAEMON; break;
@@ -181,6 +418,7 @@ int main(int argc, char *argv[])
         case 'r': rebuild_indexes = true; break;
         case 'G': no_gpu = true; break;
         case 'C': check_config = true; break;
+        case 'k': gen_key = true; break;
         case 'v':
             print_version();
             return EXIT_SUCCESS;
@@ -211,6 +449,37 @@ int main(int argc, char *argv[])
 
     if (check_config) {
         fprintf(stderr, "Configuration is valid.\n");
+        mnemon_config_free(cfg);
+        return EXIT_SUCCESS;
+    }
+
+    /* Generate MCP auth key and write to config */
+    if (gen_key) {
+        char token[65];
+        if (generate_auth_token(token, sizeof(token)) != 0) {
+            fprintf(stderr, "error: failed to generate random token\n");
+            mnemon_config_free(cfg);
+            return EXIT_FAILURE;
+        }
+
+        char *conf_path = resolve_config_path(config_path);
+        if (!conf_path) {
+            fprintf(stderr, "error: cannot determine config file path\n");
+            mnemon_config_free(cfg);
+            return EXIT_FAILURE;
+        }
+
+        if (write_key_to_config(conf_path, token) != 0) {
+            fprintf(stderr, "error: failed to write token to %s: %s\n",
+                    conf_path, strerror(errno));
+            free(conf_path);
+            mnemon_config_free(cfg);
+            return EXIT_FAILURE;
+        }
+
+        fprintf(stdout, "%s\n", token);
+        fprintf(stderr, "Auth token written to %s\n", conf_path);
+        free(conf_path);
         mnemon_config_free(cfg);
         return EXIT_SUCCESS;
     }
@@ -290,6 +559,21 @@ int main(int argc, char *argv[])
         goto cleanup_storage;
     }
 
+    /* Initialize honeypot abuse detection */
+    err = mnemon_honeypot_init(&honeypot, NULL);
+    if (err == MNEMON_OK)
+        mnemon_storage_set_honeypot(storage, honeypot);
+
+    /* Initialize reader pool if configured */
+    if (cfg->reader_pool_size > 0) {
+        memset(&reader_pool_inst, 0, sizeof(reader_pool_inst));
+        err = mnemon_reader_pool_start(&reader_pool_inst, cfg->reader_pool_size);
+        if (err == MNEMON_OK) {
+            reader_pool = &reader_pool_inst;
+            mnemon_storage_set_reader_pool(storage, reader_pool);
+        }
+    }
+
     /* Initialize MCP dispatch */
     err = mnemon_dispatch_init(&dispatch, storage);
     if (err != MNEMON_OK) {
@@ -306,8 +590,8 @@ int main(int argc, char *argv[])
             .port            = cfg->http_port,
             .max_connections = cfg->http_max_connections,
             .auth_token      = cfg->http_auth_token,
-            .tls_cert_path   = NULL, /* TODO: add tls_cert/tls_key to config */
-            .tls_key_path    = NULL,
+            .tls_cert_path   = cfg->tls_cert,
+            .tls_key_path    = cfg->tls_key,
             .mcp_path        = "/mcp",
         };
 
@@ -318,6 +602,13 @@ int main(int argc, char *argv[])
             exit_code = EXIT_FAILURE;
             goto cleanup_dispatch;
         }
+
+        /* Register SSE notifier so dispatch can push events to HTTP clients */
+        mnemon_dispatch_set_notifier(dispatch, sse_notify_fn, http);
+
+        /* Wire honeypot for auth brute-force detection */
+        if (honeypot)
+            mnemon_http_set_honeypot(http, honeypot);
     } else if (mode != MODE_STDIO && !cfg->http_enabled) {
         mnemon_log(MNEMON_LOG_WARNING,
                    "running in %s mode but [http] enabled = false -- "
@@ -407,6 +698,10 @@ cleanup_dispatch:
         mnemon_dispatch_free(dispatch);
 
 cleanup_storage:
+    if (reader_pool)
+        mnemon_reader_pool_stop(reader_pool);
+    if (honeypot)
+        mnemon_honeypot_free(honeypot);
     if (storage)
         mnemon_storage_close(storage);
 

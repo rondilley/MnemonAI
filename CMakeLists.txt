@@ -417,6 +417,7 @@ set(MNEMON_SOURCES
     src/audit.c
     src/model_mgr.c
     src/honeypot.c
+    src/sse.c
 )
 
 add_executable(mnemond ${MNEMON_SOURCES} ${SIMD_OBJECTS})
@@ -503,6 +504,7 @@ set(MNEMON_LIB_SOURCES
     src/audit.c
     src/model_mgr.c
     src/honeypot.c
+    src/sse.c
 )
 
 add_library(mnemon_core STATIC ${MNEMON_LIB_SOURCES} ${SIMD_OBJECTS})
@@ -597,10 +599,10 @@ if(ENABLE_SYSTEMD)
     )
 endif()
 
-# Man page (when available)
-# install(FILES doc/mnemond.1
-#     DESTINATION "${CMAKE_INSTALL_MANDIR}/man1"
-# )
+# Man page
+install(FILES doc/mnemond.1
+    DESTINATION "${CMAKE_INSTALL_MANDIR}/man1"
+)
 
 # ======================================================================
 #  Uninstall target (autoconf make uninstall equivalent)

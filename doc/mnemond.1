@@ -1,0 +1,551 @@
+.\" mnemond.1 -- manual page for mnemond(1)
+.\"
+.\" Copyright (c) 2026, Ron Dilley
+.\" All rights reserved.
+.\"
+.\" SPDX-License-Identifier: GPL-3.0-only
+.\"
+.TH MNEMOND 1 "2026-04-04" "mnemond" "User Commands"
+.SH NAME
+mnemond \- persistent, searchable memory daemon for LLM agents via MCP
+.SH SYNOPSIS
+.B mnemond
+.RB [ \-\-stdio " | " \-\-daemon " | " \-\-foreground ]
+.RB [ \-\-config
+.IR file ]
+.RB [ \-\-no\-gpu ]
+.br
+.B mnemond
+.B \-\-gen\-key
+.RB [ \-\-config
+.IR file ]
+.br
+.B mnemond
+.B \-\-rebuild\-indexes
+.RB [ \-\-config
+.IR file ]
+.br
+.B mnemond
+.B \-\-check\-config
+.RB [ \-\-config
+.IR file ]
+.br
+.B mnemond
+.RB [ \-\-version " | " \-\-help ]
+.SH DESCRIPTION
+.B mnemond
+is a UNIX daemon that provides persistent, searchable memory to LLM agents
+via the Model Context Protocol (MCP).
+It combines a bi-temporal knowledge graph (LMDB), full-text search
+(SQLite FTS5), and vector similarity search (usearch HNSW) into a single
+process with zero cloud dependencies.
+.PP
+In the default
+.B \-\-stdio
+mode, the daemon communicates over stdin/stdout using newline-delimited
+JSON-RPC, suitable for use as an MCP subprocess.
+In
+.B \-\-daemon
+or
+.B \-\-foreground
+mode, it listens for HTTP connections using the Streamable HTTP MCP transport
+(MCP\ 2025\-03\-26).
+.SH OPTIONS
+.TP
+.BR \-s ", " \-\-stdio
+Run in the foreground with MCP over stdin/stdout.
+This is the default mode.
+.TP
+.BR \-d ", " \-\-daemon
+Daemonize (fork, setsid).
+Logging switches to syslog after the fork.
+Requires
+.B [http] enabled = true
+in the configuration file.
+.TP
+.BR \-f ", " \-\-foreground
+Run in the foreground without stdio.
+Listens for HTTP connections.
+Requires
+.B [http] enabled = true
+in the configuration file.
+Supports
+.BR systemd (1)
+socket activation via
+.BR sd_notify (3).
+.TP
+.BR \-c ", " "\-\-config \fIfile\fR"
+Path to the configuration file.
+Overrides the default search path (see
+.BR "CONFIGURATION" ).
+.TP
+.BR \-r ", " \-\-rebuild\-indexes
+Rebuild the FTS5 and usearch indexes from the authoritative LMDB store,
+then exit.
+Useful after a crash or when upgrading index formats.
+.TP
+.BR \-G ", " \-\-no\-gpu
+Skip GPU/NPU hardware detection at startup.
+.TP
+.BR \-C ", " \-\-check\-config
+Validate the configuration file and exit.
+Returns 0 on success, 1 on error.
+.TP
+.BR \-k ", " \-\-gen\-key
+Generate a cryptographically secure MCP authentication token and write it
+to the configuration file.
+The 256-bit token (64 hexadecimal characters) is read from
+.I /dev/urandom
+and inserted as the
+.B auth_token
+value in the
+.B [http]
+section of the configuration file.
+.IP
+If the configuration file already contains an
+.B auth_token
+line, it is replaced.
+If the
+.B [http]
+section exists but has no
+.B auth_token
+line, one is added.
+If no
+.B [http]
+section exists, one is appended.
+If no configuration file exists at all, a minimal one is created with
+.B [http] enabled = true
+and the generated token.
+.IP
+The token is printed to standard output (for capture by scripts),
+and a confirmation message is printed to standard error.
+.IP
+Use
+.B \-\-config
+to specify which file to write to; otherwise the standard search path
+is used, defaulting to
+.IR ~/.config/mnemond/mnemond.conf .
+Parent directories are created as needed.
+.IP
+Example:
+.RS
+.nf
+.B "mnemond \-\-gen\-key"
+.B "mnemond \-\-gen\-key \-\-config /etc/mnemond/mnemond.conf"
+.B "TOKEN=$(mnemond \-\-gen\-key)"
+.fi
+.RE
+.TP
+.BR \-v ", " \-\-version
+Print the version string and exit.
+.TP
+.BR \-h ", " \-\-help
+Print a usage summary and exit.
+.SH CONFIGURATION
+.B mnemond
+reads an INI-format configuration file.
+The search path is:
+.PP
+.RS
+.PD 0
+.IP 1. 4
+Path given by
+.BR \-\-config
+.IP 2.
+.I $XDG_CONFIG_HOME/mnemond/mnemond.conf
+.IP 3.
+.I ~/.config/mnemond/mnemond.conf
+.IP 4.
+.I /etc/mnemond/mnemond.conf
+.PD
+.RE
+.PP
+A missing configuration file is not an error; all settings have defaults.
+The tilde character
+.RB ( ~ )
+is expanded to
+.IR $HOME .
+Lines beginning with
+.B #
+or
+.B ;
+are comments.
+.PP
+An annotated example is installed as
+.IR mnemond.conf.example .
+.SS General
+.TP
+.B data_dir
+Path to the data directory.
+Default:
+.IR ~/.local/share/mnemond .
+.TP
+.B log_level
+Logging verbosity:
+.BR debug ", " info ", " warn ", " error .
+Default:
+.BR info .
+.TP
+.B foreground
+Run in foreground mode.
+Default:
+.BR false .
+.SS LMDB
+.TP
+.B map_size_gb
+Maximum database size in gigabytes (virtual, not pre-allocated).
+Default:
+.BR 10 .
+Valid range: 1\-1024.
+.TP
+.B max_readers
+Maximum concurrent LMDB readers.
+Default:
+.BR 64 .
+.SS Embedding
+.TP
+.B model_path
+Path to the GGUF embedding model.
+Default:
+.IR ~/.local/share/mnemond/models/nomic-embed-text-v1.5.Q8_0.gguf .
+.TP
+.B dimensions
+Embedding vector dimensions.
+Default:
+.BR 768 .
+Valid range: 1\-4096.
+.TP
+.B batch_size
+Batch size for embedding generation during consolidation and bulk operations.
+Default:
+.BR 32 .
+.TP
+.B gpu_layers
+Number of model layers to offload to GPU.
+Set to 99 to offload all layers when a GPU is available.
+Default:
+.BR 99 .
+.TP
+.B model_sha256
+Optional SHA-256 hash for model file integrity verification.
+Default: empty (no verification).
+.SS Extraction
+.TP
+.B enabled
+Enable entity extraction via an external LLM endpoint.
+Default:
+.BR false .
+.TP
+.B endpoint
+URL of the chat completions endpoint.
+Default:
+.BR http://127.0.0.1:8080/v1/chat/completions .
+.TP
+.B timeout_ms
+Request timeout in milliseconds.
+Default:
+.BR 10000 .
+.TP
+.B model
+Model name to pass to the endpoint.
+Default: empty (use server default).
+.SS Search
+.TP
+.B default_top_k
+Default number of results returned by search.
+Default:
+.BR 10 .
+.TP
+.B max_top_k
+Maximum allowed
+.B top_k
+value.
+Default:
+.BR 50 .
+Valid range: 1\-200.
+.TP
+.B rrf_k
+Reciprocal Rank Fusion constant.
+Default:
+.BR 60 .
+.SS Consolidation
+.TP
+.B threshold
+Number of unconsolidated memories before auto-triggering consolidation.
+Default:
+.BR 100 .
+.TP
+.B interval_sec
+Periodic consolidation interval in seconds.
+Default:
+.BR 3600 .
+.TP
+.B similarity_threshold
+Cosine similarity threshold for clustering during consolidation.
+Default:
+.BR 0.7 .
+.SS Decay
+.TP
+.B half_life_days
+Number of days for memory importance to halve without access.
+Default:
+.BR 90 .
+.TP
+.B min_importance
+Importance score below which memories are eligible for pruning.
+Default:
+.BR 0.01 .
+.SS Import
+.TP
+.B allowed_paths
+Colon-separated list of directories that
+.B import_file
+and
+.B import_directory
+tools may read from.
+Default:
+.BR ~ .
+.TP
+.B max_batch_size
+Maximum number of memories per
+.B import_batch
+call.
+Default:
+.BR 1000 .
+.TP
+.B default_chunk_size
+Default maximum characters per chunk during import.
+Default:
+.BR 4096 .
+.TP
+.B writer_batch_size
+Memories per writer queue submission to avoid blocking.
+Default:
+.BR 50 .
+.SS Security
+.TP
+.B detect_secrets
+Enable FSM-based secret pattern detection in stored content.
+Default:
+.BR true .
+.TP
+.B max_memory_size_kb
+Reject memories larger than this value in kilobytes.
+Default:
+.BR 64 .
+.SS Threads
+.TP
+.B reader_pool_size
+Number of reader threads.
+Set to 0 for automatic detection (min of CPU count and 16).
+Default:
+.BR 0 .
+.TP
+.B write_queue_depth
+Maximum depth of the writer queue.
+Default:
+.BR 1024 .
+.SS HTTP
+.TP
+.B enabled
+Enable the HTTP transport.
+Required for
+.B \-\-daemon
+and
+.B \-\-foreground
+modes.
+Default:
+.BR false .
+.TP
+.B bind
+Address to bind the HTTP listener to.
+Default:
+.BR 127.0.0.1 .
+.TP
+.B port
+TCP port for the HTTP listener.
+Default:
+.BR 3847 .
+.TP
+.B max_connections
+Maximum concurrent HTTP connections.
+Default:
+.BR 32 .
+.TP
+.B auth_token
+Static Bearer token for HTTP authentication.
+Required when
+.B bind
+is set to a non-localhost address.
+Clients must include an
+.B "Authorization: Bearer <token>"
+header.
+Can be generated with
+.BR "\-\-gen\-key" .
+Default: empty (no authentication).
+.SH SIGNALS
+.TP
+.B SIGTERM\fR, \fBSIGINT
+Initiate graceful shutdown.
+.TP
+.B SIGHUP
+Reload the configuration file.
+Currently reloads the log level.
+.TP
+.B SIGUSR1
+Dump statistics (memory, entity, edge, and index counts) to the log.
+.TP
+.B SIGPIPE
+Ignored.
+.SH MCP TOOLS
+.B mnemond
+exposes 28 functional MCP tools and 4 honeypot decoy tools.
+The functional tools include:
+.PP
+.B Memory management:
+store_memory, retrieve_memory, update_memory, delete_memory, list_memories,
+search_memories, batch_store
+.PP
+.B Knowledge graph:
+add_entity, get_entity, update_entity, delete_entity, list_entities,
+add_edge, get_edges, delete_edge, traverse_graph
+.PP
+.B Search and retrieval:
+search_memories, search_entities, hybrid_search
+.PP
+.B Import:
+import_file, import_directory, import_batch
+.PP
+.B Maintenance:
+consolidate, rebuild_indexes, get_stats, get_memory_health
+.PP
+.B Temporal:
+time_travel_query, temporal_diff
+.PP
+See the MCP tool schema (via
+.BR initialize )
+for full parameter documentation.
+.SH TRANSPORTS
+.SS stdio
+Newline-delimited JSON-RPC 2.0 over stdin/stdout.
+Selected with
+.B \-\-stdio
+(the default).
+Logging goes to stderr only.
+.SS Streamable HTTP
+HTTP POST/GET/DELETE on the
+.I /mcp
+endpoint.
+Conforms to MCP\ 2025\-03\-26.
+Sessions are tracked via the
+.B Mcp\-Session\-Id
+header.
+Bearer token authentication is supported.
+Origin validation prevents CSRF.
+.SH STORAGE
+LMDB is the source of truth.
+FTS5 (full-text search) and usearch (vector similarity) are derived
+indexes and can be rebuilt with
+.BR \-\-rebuild\-indexes .
+.PP
+Serialization uses hand-rolled MessagePack with short map keys and a
+version byte per record.
+IDs are UUIDv7 (RFC\ 9562), providing time-sortable 16-byte binary keys.
+.SH FILES
+.TP
+.I ~/.config/mnemond/mnemond.conf
+Default user configuration file.
+.TP
+.I /etc/mnemond/mnemond.conf
+System-wide configuration file.
+.TP
+.I ~/.local/share/mnemond/
+Default data directory (LMDB, SQLite, usearch indexes).
+.TP
+.I ~/.local/share/mnemond/models/
+Default embedding model directory.
+.SH EXIT STATUS
+.TP
+.B 0
+Success.
+.TP
+.B 1
+Failure (configuration error, storage error, etc.).
+.SH EXAMPLES
+Run as an MCP subprocess (default):
+.PP
+.RS
+.nf
+.B mnemond
+.fi
+.RE
+.PP
+Generate an auth token and start as a daemon:
+.PP
+.RS
+.nf
+.B "mnemond \-\-gen\-key"
+.B "mnemond \-\-daemon"
+.fi
+.RE
+.PP
+Generate a key for a specific config file:
+.PP
+.RS
+.nf
+.B "mnemond \-\-gen\-key \-\-config /etc/mnemond/mnemond.conf"
+.fi
+.RE
+.PP
+Capture the generated token in a script:
+.PP
+.RS
+.nf
+.B "TOKEN=$(mnemond \-\-gen\-key)"
+.B "echo \(dqUse Bearer $TOKEN to authenticate\(dq"
+.fi
+.RE
+.PP
+Validate configuration:
+.PP
+.RS
+.nf
+.B "mnemond \-\-check\-config \-\-config /etc/mnemond/mnemond.conf"
+.fi
+.RE
+.PP
+Run in the foreground with a custom config:
+.PP
+.RS
+.nf
+.B "mnemond \-\-foreground \-\-config ./mnemond.conf"
+.fi
+.RE
+.PP
+Rebuild indexes after a crash:
+.PP
+.RS
+.nf
+.B "mnemond \-\-rebuild\-indexes"
+.fi
+.RE
+.PP
+Send SIGUSR1 to dump stats:
+.PP
+.RS
+.nf
+.B "kill \-USR1 $(pidof mnemond)"
+.fi
+.RE
+.SH SEE ALSO
+.BR systemd (1),
+.BR llama\-cli (1),
+.BR lmdb (3)
+.PP
+Model Context Protocol specification:
+.UR https://spec.modelcontextprotocol.io
+.UE
+.SH AUTHORS
+Ron Dilley
+.SH LICENSE
+GPL-3.0-only
