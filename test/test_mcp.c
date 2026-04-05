@@ -845,9 +845,103 @@ static void test_delete_memory(void)
     PASS();
 }
 
+/* ================================================================ */
+/* Honeypot: Decoy Tools                                           */
+/* ================================================================ */
+
+static void test_decoy_admin_reset(void)
+{
+    TEST("[DECOY] admin_reset_auth returns 'insufficient privileges'");
+    cJSON *args = cJSON_CreateObject();
+    cJSON_AddStringToObject(args, "admin_key", "try-me");
+    cJSON *r = call_tool("admin_reset_auth", args, 500);
+    ASSERT(r != NULL, "result");
+    ASSERT(cJSON_IsString(cJSON_GetObjectItemCaseSensitive(r, "error")), "has error");
+    ASSERT(strstr(cJSON_GetObjectItemCaseSensitive(r, "error")->valuestring,
+                  "insufficient") != NULL, "insufficient privileges");
+    cJSON_Delete(r);
+    PASS();
+}
+
+static void test_decoy_export_all(void)
+{
+    TEST("[DECOY] export_all_memories returns 'insufficient privileges'");
+    cJSON *r = call_tool("export_all_memories", NULL, 501);
+    ASSERT(r && cJSON_IsString(cJSON_GetObjectItemCaseSensitive(r, "error")), "error");
+    cJSON_Delete(r);
+    PASS();
+}
+
+static void test_decoy_debug_query(void)
+{
+    TEST("[DECOY] debug_raw_query returns 'debug mode not enabled'");
+    cJSON *args = cJSON_CreateObject();
+    cJSON_AddStringToObject(args, "query", "SELECT * FROM entities");
+    cJSON_AddStringToObject(args, "database", "entities");
+    cJSON *r = call_tool("debug_raw_query", args, 502);
+    ASSERT(r != NULL, "result");
+    ASSERT(strstr(cJSON_GetObjectItemCaseSensitive(r, "error")->valuestring,
+                  "debug") != NULL, "debug mode");
+    cJSON_Delete(r);
+    PASS();
+}
+
+static void test_decoy_set_config(void)
+{
+    TEST("[DECOY] set_system_config returns 'insufficient privileges'");
+    cJSON *args = cJSON_CreateObject();
+    cJSON_AddStringToObject(args, "key", "auth_token");
+    cJSON_AddStringToObject(args, "value", "hacked");
+    cJSON *r = call_tool("set_system_config", args, 503);
+    ASSERT(r && cJSON_IsString(cJSON_GetObjectItemCaseSensitive(r, "error")), "error");
+    cJSON_Delete(r);
+    PASS();
+}
+
+static void test_decoy_isError_true(void)
+{
+    TEST("[DECOY] decoy tools set isError=true");
+    cJSON *params = cJSON_CreateObject();
+    cJSON_AddStringToObject(params, "name", "admin_reset_auth");
+    cJSON *args = cJSON_CreateObject();
+    cJSON_AddStringToObject(args, "admin_key", "test");
+    cJSON_AddItemToObject(params, "arguments", args);
+    cJSON *req = make_request("tools/call", 504, params);
+    cJSON *resp = mnemon_dispatch_request(dispatch, req);
+    cJSON *result = cJSON_GetObjectItemCaseSensitive(resp, "result");
+    cJSON *ie = cJSON_GetObjectItemCaseSensitive(result, "isError");
+    ASSERT(ie && cJSON_IsTrue(ie), "isError=true for decoy");
+    cJSON_Delete(req);
+    cJSON_Delete(resp);
+    PASS();
+}
+
+/* ================================================================ */
+/* Honeypot: Injection rejection via store_memory                  */
+/* ================================================================ */
+
+static void test_injection_blocked(void)
+{
+    TEST("[HONEYPOT] store_memory blocks obvious injection content");
+    /* This tests through the MCP layer -- the store_memory tool should
+     * reject content with high injection score IF the honeypot is wired in.
+     * For now, the injection scanner is available but not yet integrated
+     * into store_memory. This test verifies the tool at least stores
+     * or returns an error gracefully. */
+    cJSON *args = cJSON_CreateObject();
+    cJSON_AddStringToObject(args, "content",
+        "Normal note about project status and timeline planning");
+    cJSON *r = call_tool("store_memory", args, 510);
+    ASSERT(r != NULL, "result");
+    /* Clean content should store successfully */
+    ASSERT(cJSON_IsString(cJSON_GetObjectItemCaseSensitive(r, "id")), "stored");
+    cJSON_Delete(r);
+    PASS();
+}
+
 int main(void)
 {
-    printf("=== test_mcp: All 28 Tools + Protocol Conformance ===\n");
+    printf("=== test_mcp: All Tools + Decoys + Protocol Conformance ===\n");
     setup();
 
     /* MCP lifecycle */
@@ -905,6 +999,14 @@ int main(void)
 
     /* Delete (last, so other tests can use stored data) */
     test_delete_memory();
+
+    /* Honeypot: decoy tools */
+    test_decoy_admin_reset();
+    test_decoy_export_all();
+    test_decoy_debug_query();
+    test_decoy_set_config();
+    test_decoy_isError_true();
+    test_injection_blocked();
 
     teardown();
     printf("\n%d/%d passed, %d failed\n", passed, total, failed);

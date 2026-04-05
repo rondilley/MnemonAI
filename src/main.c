@@ -4,7 +4,7 @@
  *
  * SPDX-License-Identifier: GPL-3.0-only
  *
- * main.c -- Entry point and startup/shutdown orchestration for mnemon_ai
+ * main.c -- Entry point and startup/shutdown orchestration for mnemond
  *
  * Handles CLI argument parsing, configuration loading, component
  * initialization, and the main MCP event loop.
@@ -35,6 +35,7 @@
 #include "hardware.h"
 #include "storage.h"
 #include "mcp_stdio.h"
+#include "mcp_http.h"
 #include "mcp_dispatch.h"
 #include "threads.h"
 
@@ -60,7 +61,10 @@ typedef enum {
 
 static void print_version(void)
 {
-    fprintf(stderr, "%s %s\n", PACKAGE_NAME, PACKAGE_VERSION);
+    if (PACKAGE_GIT_COMMIT[0] != '\0')
+        fprintf(stderr, "%s v%s (%s)\n", PACKAGE_NAME, PACKAGE_VERSION, PACKAGE_GIT_COMMIT);
+    else
+        fprintf(stderr, "%s v%s\n", PACKAGE_NAME, PACKAGE_VERSION);
 }
 
 static void print_usage(const char *progname)
@@ -160,6 +164,7 @@ int main(int argc, char *argv[])
     int opt;
 
     mnemon_config_t *cfg = NULL;
+    mnemon_http_t *http = NULL;
     mnemon_storage_t *storage = NULL;
     mnemon_dispatch_t *dispatch = NULL;
     mnemon_hardware_t hw;
@@ -294,6 +299,32 @@ int main(int argc, char *argv[])
         goto cleanup_storage;
     }
 
+    /* Start HTTP transport for daemon/foreground modes */
+    if (mode != MODE_STDIO && cfg->http_enabled) {
+        mnemon_http_config_t http_cfg = {
+            .bind_address    = cfg->http_bind,
+            .port            = cfg->http_port,
+            .max_connections = cfg->http_max_connections,
+            .auth_token      = cfg->http_auth_token,
+            .tls_cert_path   = NULL, /* TODO: add tls_cert/tls_key to config */
+            .tls_key_path    = NULL,
+            .mcp_path        = "/mcp",
+        };
+
+        err = mnemon_http_start(&http, &http_cfg, dispatch);
+        if (err != MNEMON_OK) {
+            mnemon_log(MNEMON_LOG_ERROR, "HTTP transport failed: %s",
+                       mnemon_err_msg());
+            exit_code = EXIT_FAILURE;
+            goto cleanup_dispatch;
+        }
+    } else if (mode != MODE_STDIO && !cfg->http_enabled) {
+        mnemon_log(MNEMON_LOG_WARNING,
+                   "running in %s mode but [http] enabled = false -- "
+                   "no network listener. Set enabled = true in config.",
+                   mode == MODE_DAEMON ? "daemon" : "foreground");
+    }
+
     /* Notify systemd if in foreground mode */
     if (mode == MODE_FOREGROUND)
         mnemon_sd_notify_ready();
@@ -366,6 +397,10 @@ int main(int argc, char *argv[])
 
     if (mode == MODE_FOREGROUND || mode == MODE_DAEMON)
         mnemon_sd_notify_stopping();
+
+    /* Stop HTTP transport */
+    if (http)
+        mnemon_http_stop(http);
 
 cleanup_dispatch:
     if (dispatch)

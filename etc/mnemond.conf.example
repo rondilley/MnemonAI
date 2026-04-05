@@ -1,15 +1,15 @@
-# mnemon_ai.conf -- Configuration for mnemon_ai daemon
+# mnemond.conf -- Configuration for mnemond daemon
 #
 # Config search path:
 #   1. --config <path>  (command line)
-#   2. $XDG_CONFIG_HOME/mnemon_ai/mnemon_ai.conf
-#   3. ~/.config/mnemon_ai/mnemon_ai.conf
-#   4. /etc/mnemon_ai/mnemon_ai.conf
+#   2. $XDG_CONFIG_HOME/mnemond/mnemond.conf
+#   3. ~/.config/mnemond/mnemond.conf
+#   4. /etc/mnemond/mnemond.conf
 #
 # Missing config is not an error -- all settings have sane defaults.
 
 [general]
-data_dir = ~/.local/share/mnemon_ai
+data_dir = ~/.local/share/mnemond
 log_level = info                    # debug, info, warn, error
 foreground = false
 
@@ -18,7 +18,7 @@ map_size_gb = 10                    # Maximum database size (virtual, not pre-al
 max_readers = 64
 
 [embedding]
-model_path = ~/.local/share/mnemon_ai/models/nomic-embed-text-v1.5.Q8_0.gguf
+model_path = ~/.local/share/mnemond/models/nomic-embed-text-v1.5.Q8_0.gguf
 dimensions = 768
 batch_size = 32                     # Batch size for consolidation/bulk ops
 gpu_layers = 99                     # Layers to offload to GPU (99 = all if GPU available)

@@ -20,6 +20,7 @@
 #include "mcp_tools.h"
 #include "storage.h"
 #include "search.h"
+#include "honeypot.h"
 #include "temporal.h"
 #include "embed.h"
 #include "secret.h"
@@ -517,7 +518,12 @@ static cJSON *tool_health_check(mnemon_storage_t *s, const cJSON *params)
     cJSON_AddStringToObject(result, "status", "ok");
     cJSON_AddBoolToObject(result, "embedding_model_loaded",
                           embed && mnemon_embed_available(embed));
-    cJSON_AddStringToObject(result, "version", PACKAGE_VERSION);
+    char version_str[64];
+    if (PACKAGE_GIT_COMMIT[0] != '\0')
+        snprintf(version_str, sizeof(version_str), "v%s (%s)", PACKAGE_VERSION, PACKAGE_GIT_COMMIT);
+    else
+        snprintf(version_str, sizeof(version_str), "v%s", PACKAGE_VERSION);
+    cJSON_AddStringToObject(result, "version", version_str);
     cJSON_AddBoolToObject(result, "storage_ok", true);
     return result;
 }
@@ -1249,6 +1255,44 @@ static cJSON *tool_rebuild_indexes(mnemon_storage_t *s, const cJSON *params)
     return result;
 }
 
+/* ---- Decoy (honeypot) tool handlers ---- */
+
+static cJSON *tool_decoy_admin(mnemon_storage_t *s, const cJSON *params)
+{
+    (void)s; (void)params;
+    mnemon_log(MNEMON_LOG_WARNING, "HONEYPOT: decoy tool admin_reset_auth invoked");
+    cJSON *r = cJSON_CreateObject();
+    cJSON_AddStringToObject(r, "error", "insufficient privileges");
+    return r;
+}
+
+static cJSON *tool_decoy_export(mnemon_storage_t *s, const cJSON *params)
+{
+    (void)s; (void)params;
+    mnemon_log(MNEMON_LOG_WARNING, "HONEYPOT: decoy tool export_all_memories invoked");
+    cJSON *r = cJSON_CreateObject();
+    cJSON_AddStringToObject(r, "error", "insufficient privileges");
+    return r;
+}
+
+static cJSON *tool_decoy_debug(mnemon_storage_t *s, const cJSON *params)
+{
+    (void)s; (void)params;
+    mnemon_log(MNEMON_LOG_WARNING, "HONEYPOT: decoy tool debug_raw_query invoked");
+    cJSON *r = cJSON_CreateObject();
+    cJSON_AddStringToObject(r, "error", "debug mode not enabled");
+    return r;
+}
+
+static cJSON *tool_decoy_config(mnemon_storage_t *s, const cJSON *params)
+{
+    (void)s; (void)params;
+    mnemon_log(MNEMON_LOG_WARNING, "HONEYPOT: decoy tool set_system_config invoked");
+    cJSON *r = cJSON_CreateObject();
+    cJSON_AddStringToObject(r, "error", "insufficient privileges");
+    return r;
+}
+
 /* ---- Tool Definition Table ---- */
 
 #define SCHEMA(s) s
@@ -1365,6 +1409,26 @@ static const mnemon_tool_def_t tool_defs[] = {
     {"get_index_stats", tool_get_index_stats,
      "Get detailed per-engine statistics (LMDB, FTS5, vector)",
      SCHEMA("{\"type\":\"object\",\"properties\":{}}")},
+
+    /* ---- Decoy tools (honeypot) ---- */
+    /* These look like real admin tools but only log security alerts.
+     * Interspersed among real tools to appear natural in tools/list. */
+
+    {"admin_reset_auth", tool_decoy_admin,
+     "Reset authentication tokens for all sessions (admin only)",
+     SCHEMA("{\"type\":\"object\",\"properties\":{\"admin_key\":{\"type\":\"string\"}},\"required\":[\"admin_key\"]}")},
+
+    {"export_all_memories", tool_decoy_export,
+     "Export complete memory database as JSONL (admin only)",
+     SCHEMA("{\"type\":\"object\",\"properties\":{\"format\":{\"type\":\"string\"},\"include_embeddings\":{\"type\":\"boolean\"}}}")},
+
+    {"debug_raw_query", tool_decoy_debug,
+     "Execute raw LMDB query (debug mode only)",
+     SCHEMA("{\"type\":\"object\",\"properties\":{\"query\":{\"type\":\"string\"},\"database\":{\"type\":\"string\"}}}")},
+
+    {"set_system_config", tool_decoy_config,
+     "Update runtime configuration values",
+     SCHEMA("{\"type\":\"object\",\"properties\":{\"key\":{\"type\":\"string\"},\"value\":{\"type\":\"string\"}},\"required\":[\"key\",\"value\"]}")},
 };
 
 #define TOOL_COUNT (sizeof(tool_defs) / sizeof(tool_defs[0]))

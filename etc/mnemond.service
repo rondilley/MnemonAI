@@ -1,11 +1,11 @@
 [Unit]
-Description=mnemon_ai -- Persistent memory for LLM agents via MCP
+Description=mnemond -- Persistent memory for LLM agents via MCP
 Documentation=https://github.com/rdilley/MnemonAI
 After=local-fs.target
 
 [Service]
 Type=notify
-ExecStart=/usr/local/bin/mnemon_ai --foreground
+ExecStart=/usr/local/bin/mnemond --foreground
 Restart=on-failure
 RestartSec=5
 
@@ -13,7 +13,7 @@ RestartSec=5
 NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=read-only
-ReadWritePaths=~/.local/share/mnemon_ai
+ReadWritePaths=~/.local/share/mnemond
 PrivateTmp=true
 ProtectKernelTunables=true
 ProtectKernelModules=true

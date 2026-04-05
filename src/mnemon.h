@@ -4,7 +4,7 @@
  *
  * SPDX-License-Identifier: GPL-3.0-only
  *
- * mnemon.h -- Common definitions for mnemon_ai
+ * mnemon.h -- Common definitions for mnemond
  */
 
 #ifndef MNEMON_H

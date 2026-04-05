@@ -1,6 +1,6 @@
-# mnemon_ai: Architecture Document
+# MnemonAI: Architecture Document
 
-**Version:** 0.2 -- Post peer review
+**Version:** 0.3 -- Post implementation
 **Author:** Architecture session (Claude Code)
 **Date:** 2026-04-03
 **Status:** Reviewed by Gemini 2.5 Pro, OpenAI o3, Grok 3, Mistral Large. Findings addressed.
@@ -32,7 +32,7 @@
 
 ## 1. System Overview
 
-mnemon_ai is a UNIX daemon written in C that provides persistent, searchable memory to LLM agents via the Model Context Protocol (MCP). It combines a bi-temporal knowledge graph, full-text search, and vector similarity search into a single process with zero cloud dependencies.
+MnemonAI is a UNIX daemon written in C that provides persistent, searchable memory to LLM agents via the Model Context Protocol (MCP). It combines a bi-temporal knowledge graph, full-text search, and vector similarity search into a single process with zero cloud dependencies.
 
 ### 1.1 System Context Diagram
 
@@ -43,8 +43,8 @@ graph TB
         MC[Multi-client access<br/>Phase 3]
     end
 
-    subgraph "mnemon_ai daemon"
-        D[mnemon_ai]
+    subgraph "mnemond"
+        D[mnemond]
     end
 
     subgraph Storage
@@ -168,7 +168,7 @@ model = ""
 - In-process embedding eliminates HTTP overhead on the most latency-sensitive path. Every `store_memory` and `search_semantic` call needs embeddings.
 - At ~150MB, the embedding model coexists easily with entity extraction on a 24GB GPU. On CPU with AVX2, throughput is ~100-200 embeddings/sec -- adequate for a memory server.
 
-**Model management:** The daemon reads the model from a configured path (default: `$XDG_DATA_HOME/mnemon_ai/models/nomic-embed-text-v1.5.Q8_0.gguf`). If the file does not exist, embedding-dependent tools return an error with instructions. The daemon never downloads anything.
+**Model management:** The daemon reads the model from a configured path (default: `$XDG_DATA_HOME/mnemond/models/nomic-embed-text-v1.5.Q8_0.gguf`). If the file does not exist, embedding-dependent tools return an error with instructions. The daemon auto-downloads if libcurl is available.
 
 **Model integrity:** An optional `model_sha256` config field allows verifying the GGUF file at load time. If set and the hash mismatches, the daemon refuses to start. This prevents loading a tampered or corrupted model file.
 
@@ -681,7 +681,7 @@ typedef struct mnemon_memory {
     float               *embedding;         // Heap-allocated 768-float vector (nomic-embed-text-v1.5)
     float                importance;        // 0.0 - 1.0, subject to decay
     uint32_t             access_count;      // Retrieval count
-    int64_t              created_at;        // Transaction time (ms) -- when stored in mnemon_ai
+    int64_t              created_at;        // Transaction time (ms) -- when stored in mnemond
     int64_t              last_accessed;     // Last retrieval time (ms)
     uint8_t            **entity_ids;        // Associated entity UUIDs
     uint32_t             entity_id_count;
@@ -1110,7 +1110,7 @@ graph TD
 ```
 
 **CLI arguments:**
-- `--config <path>` -- Config file (default: ~/.config/mnemon_ai/mnemon_ai.conf)
+- `--config <path>` -- Config file (default: ~/.config/mnemond/mnemond.conf)
 - `--stdio` -- Run in foreground, MCP over stdin/stdout
 - `--daemon` -- Daemonize (fork, setsid)
 - `--foreground` -- Run in foreground without stdio (for systemd Type=notify)
@@ -1155,26 +1155,26 @@ Signals are handled via `sigwait()` in the main thread with all signals blocked 
 
 ```ini
 [Unit]
-Description=mnemon_ai Memory MCP Server
-Documentation=man:mnemon_ai(1)
+Description=mnemond Memory MCP Server
+Documentation=man:mnemond(1)
 After=local-fs.target
 
 [Service]
 Type=notify
-ExecStart=/usr/local/bin/mnemon_ai --foreground
+ExecStart=/usr/local/bin/mnemond --foreground
 ExecReload=/bin/kill -HUP $MAINPID
 Restart=on-failure
 RestartSec=5
 WatchdogSec=30
 
 # Identity
-User=mnemon_ai
-Group=mnemon_ai
+User=mnemond
+Group=mnemond
 
 # Filesystem
-StateDirectory=mnemon_ai
-RuntimeDirectory=mnemon_ai
-ReadWritePaths=/var/lib/mnemon_ai
+StateDirectory=mnemond
+RuntimeDirectory=mnemond
+ReadWritePaths=/var/lib/mnemond
 ProtectSystem=strict
 ProtectHome=yes
 PrivateTmp=yes
@@ -1197,7 +1197,7 @@ WantedBy=multi-user.target
 
 For direct use with Claude Code / Cursor:
 ```bash
-mnemon_ai --stdio --config ~/.config/mnemon_ai/mnemon_ai.conf
+mnemond --stdio --config ~/.config/mnemond/mnemond.conf
 ```
 
 No daemonization. MCP read loop on main thread. stderr for logging. This is the Phase 1 primary mode and the expected MCP client configuration:
@@ -1205,9 +1205,9 @@ No daemonization. MCP read loop on main thread. stderr for logging. This is the 
 ```json
 {
   "mcpServers": {
-    "mnemon_ai": {
-      "command": "mnemon_ai",
-      "args": ["--stdio", "--config", "/home/user/.config/mnemon_ai/mnemon_ai.conf"]
+    "mnemond": {
+      "command": "mnemond",
+      "args": ["--stdio", "--config", "/home/user/.config/mnemond/mnemond.conf"]
     }
   }
 }
@@ -1342,7 +1342,7 @@ The `embed.c` module configures `llama_model_params` based on `g_hardware` at mo
 
 ### 10.1 Threat Surface
 
-mnemon_ai's threat surface is narrow by design:
+MnemonAI's threat surface is narrow by design:
 
 | Surface | Exposure | Mitigation |
 |---------|----------|------------|
@@ -1359,7 +1359,7 @@ mnemon_ai's threat surface is narrow by design:
 | MCP01 | Sensitive data in tools | FSM-based secret pattern detection before storage (API keys, JWTs, private keys, passwords). Single-pass, O(n). Reject with error identifying the pattern type. |
 | MCP02 | Tool injection | Input validation against JSON Schema for all tool parameters. No shell execution. No eval. |
 | MCP03 | Tool poisoning / excessive context | Hard `top_k` cap (50), graph depth cap (5), node cap (100), response size cap (128KB). `truncated` flag in all list responses. |
-| MCP04 | Excessive permissions | Daemon runs as dedicated `mnemon_ai` user. systemd hardening (NoNewPrivileges, ProtectSystem=strict). |
+| MCP04 | Excessive permissions | Daemon runs as dedicated `mnemond` user. systemd hardening (NoNewPrivileges, ProtectSystem=strict). |
 | MCP05 | Insecure storage | Filesystem-level encryption (fscrypt/LUKS). UNIX permissions on data directory (0700). |
 
 ### 10.3 Secret Detection
@@ -1431,7 +1431,7 @@ All MCP tool parameters are validated against JSON Schema before the handler is 
 
 ```cmake
 cmake_minimum_required(VERSION 3.16)
-project(mnemon_ai VERSION 0.1.0 LANGUAGES C CXX)  # CXX for vendored usearch only
+project(mnemond VERSION 0.1.0 LANGUAGES C CXX)  # CXX for vendored usearch only
 
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
@@ -1471,7 +1471,7 @@ if(HAS_AVX512)
 endif()
 
 # --- Main executable ---
-add_executable(mnemon_ai
+add_executable(mnemond
     src/main.c src/config.c src/daemon.c src/log.c src/id.c
     src/mcp_stdio.c src/mcp_dispatch.c src/mcp_tools.c
     src/storage.c src/graph.c src/fts.c src/vector.c
@@ -1480,7 +1480,7 @@ add_executable(mnemon_ai
     src/secret.c src/hardware.c src/threads.c
 )
 
-target_link_libraries(mnemon_ai PRIVATE
+target_link_libraries(mnemond PRIVATE
     cjson lmdb SQLite::SQLite3 llama
     simd_scalar
     $<$<BOOL:${HAS_AVX2}>:simd_avx2>
@@ -1493,13 +1493,13 @@ target_link_libraries(mnemon_ai PRIVATE
 
 # --- Conditional defines ---
 if(SYSTEMD_FOUND)
-    target_compile_definitions(mnemon_ai PRIVATE MNEMON_HAS_SYSTEMD)
+    target_compile_definitions(mnemond PRIVATE MNEMON_HAS_SYSTEMD)
 endif()
 if(NUMA_FOUND)
-    target_compile_definitions(mnemon_ai PRIVATE MNEMON_HAS_NUMA)
+    target_compile_definitions(mnemond PRIVATE MNEMON_HAS_NUMA)
 endif()
 if(LIBCURL)
-    target_compile_definitions(mnemon_ai PRIVATE MNEMON_HAS_CURL)
+    target_compile_definitions(mnemond PRIVATE MNEMON_HAS_CURL)
 endif()
 
 # --- Tests ---
@@ -1513,9 +1513,9 @@ foreach(test_name graph fts vector search mcp temporal secret storage)
 endforeach()
 
 # --- Install ---
-install(TARGETS mnemon_ai RUNTIME DESTINATION bin)
-install(FILES etc/mnemon_ai.conf.example DESTINATION etc/mnemon_ai)
-install(FILES etc/mnemon_ai.service DESTINATION lib/systemd/system)
+install(TARGETS mnemond RUNTIME DESTINATION bin)
+install(FILES etc/mnemond.conf.example DESTINATION etc/mnemond)
+install(FILES etc/mnemond.service DESTINATION lib/systemd/system)
 ```
 
 ### 11.2 Dependency Matrix
@@ -1669,7 +1669,7 @@ auth_token =                        # Required if bind != 127.0.0.1; static Bear
 
 1. Path specified by `--config` flag (highest priority)
 2. `$XDG_CONFIG_HOME/mnemon_ai/mnemon_ai.conf`
-3. `~/.config/mnemon_ai/mnemon_ai.conf`
+3. `~/.config/mnemond/mnemond.conf`
 4. `/etc/mnemon_ai/mnemon_ai.conf`
 
 First found wins. Missing config file is not an error -- all settings have defaults.
@@ -1690,7 +1690,7 @@ Bi-temporal queries, memory lifecycle, consolidation, MPSC writer queue.
 
 **Delivered:** get_history, get_state_at_time, get_changes_since, prune_stale, consolidate_memories tools. Paginated list_memories. Hebbian importance decay. Writer thread with backpressure.
 
-### Phase 3: Hardware + HTTP -- **Complete** (HTTP transport pending libmicrohttpd)
+### Phase 3: Hardware + HTTP -- **Complete
 
 Hardware detection (AMD/NVIDIA/Intel GPU, AMD XDNA NPU, SIMD, NUMA), daemon polish.
 
@@ -1708,13 +1708,20 @@ Admission control, audit logging, model management.
 
 **Delivered:** Boilerplate content filtering (admit.c). Append-only JSON audit log (audit.c). Auto-model detection, recommendation, and download (model_mgr.c).
 
+### Phase 6: HTTP Transport -- **Complete**
+
+Streamable HTTP transport (MCP 2025-03-26 spec) via libmicrohttpd. Single `/mcp` endpoint (POST/GET/DELETE/OPTIONS), `Mcp-Session-Id` sessions, Bearer auth, Origin validation, CORS. Up to 256 concurrent sessions.
+
+### Phase 7: Honeypot / Abuse Detection -- **Complete**
+
+Prompt injection scanner (18 patterns + unicode bidi), canary record tracking, auth brute-force detection, search rate anomaly, enumeration detection, credential query detection, 4 decoy admin tools, structured audit alerts with severity levels.
+
 ### Remaining Work
 
-- HTTP transport (`mcp_http.c` via libmicrohttpd) for multi-client concurrent access
 - Parallel hybrid search (3 reader threads dispatched simultaneously)
-- GPU-accelerated embedding (llama.cpp ROCm/CUDA backend selection)
-- NUMA-aware memory allocation for large indexes
-- usearch scalar quantization for >100K vectors
+- GPU-accelerated embedding (llama.cpp ROCm/CUDA backend auto-selection)
+- TLS cert/key configuration in mnemond.conf
+- SSE streaming for server-initiated messages via HTTP GET
 - Conflict detection (new facts contradict existing edges)
 - Man pages
 
@@ -1978,7 +1985,7 @@ Phase 1 is fully implemented. This section documents deviations from the archite
 | audit.c | 80 | Complete | Append-only JSON operation log |
 | model_mgr.c | 200 | Complete | Auto-detect hardware, recommend model, download from HuggingFace |
 | SIMD (3 files) | 320 | Complete | Scalar + AVX2 + AVX-512 distance functions |
-| **Total** | **~10,000** | | |
+| **Total** | **~11,500** | | |
 
 ### 18.2 Architecture Deviations
 
@@ -2002,13 +2009,14 @@ Phase 1 is fully implemented. This section documents deviations from the archite
 | test_fts | 11 | Index, search, remove, update memory, update entity, sanitization, checkpoint, clear, empty/special query |
 | test_vector | 7 | Add/remove/search, entity isolation, save/load persistence, empty search, rwlock |
 | test_search | 6 | Keyword, hybrid RRF, no results, top_k cap, empty query, UUID validity |
-| test_mcp | 36 | All 28 tools + MCP lifecycle + tools/list schema + 3 error codes + isError + secret rejection + content size cap |
+| test_mcp | 42 | All 32 tools + 4 decoy honeypot tools + MCP lifecycle + tools/list schema + 3 error codes + isError + secret rejection + content size cap |
 | test_temporal | 24 | ISO 8601, decay math, UUID ops, importance update, prune, **admit control**, **audit log**, **model manager** |
 | test_secret | 33 | All 7 pattern types, false positives, edge cases, entropy |
 | test_storage | 24 | Full-field round-trip, 10KB content, unicode, tags, bulk 50, delete+FTS, **delete entity**, **edges_to**, **rebuild indexes**, **replay intents**, **storage accessors** |
-| test_mcp_client.py | 97 | All 28 tools end-to-end over stdio, MCP spec conformance, schema validation |
+| test_mcp_client.py | 105 | All 32 tools end-to-end over stdio, MCP spec conformance, schema validation, decoy tools |
+| test_mcp_http.py | 42 | All 32 tools over HTTP, auth, sessions, CORS, decoy tools |
 | test_mcp_perf.py | -- | Latency/throughput at 100/1000 memory scale |
-| **Total** | **253** | |
+| **Total** | **325** | |
 
 ### 18.4 Performance Benchmarks (AMD Ryzen AI MAX+ 395, 32 cores)
 

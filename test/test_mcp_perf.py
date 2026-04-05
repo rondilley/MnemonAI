@@ -2,7 +2,7 @@
 """
 MCP Performance & Load Test
 
-Benchmarks mnemon_ai under increasing load to measure:
+Benchmarks mnemond under increasing load to measure:
   1. Latency per operation (store, retrieve, search)
   2. Throughput (operations/second)
   3. Memory growth under load
@@ -13,7 +13,7 @@ Usage:
     cd build
     LD_LIBRARY_PATH=~/.local/lib python3 ../test/test_mcp_perf.py
 
-Requires mnemon_ai binary in the current directory.
+Requires mnemond binary in the current directory.
 """
 
 import json
@@ -23,7 +23,7 @@ import subprocess
 import sys
 import time
 
-BINARY = "./mnemon_ai"
+BINARY = "./mnemond"
 
 
 def send_recv(proc, request):
@@ -38,7 +38,7 @@ def send_recv(proc, request):
 
 
 def start_server(tmpdir):
-    """Start mnemon_ai in stdio mode."""
+    """Start mnemond in stdio mode."""
     env = os.environ.copy()
     home = os.path.expanduser("~")
     env["LD_LIBRARY_PATH"] = f"{home}/.local/lib:" + env.get("LD_LIBRARY_PATH", "")
@@ -159,7 +159,7 @@ def main():
     os.makedirs(tmpdir, exist_ok=True)
 
     print("=" * 70)
-    print("  mnemon_ai MCP Performance & Load Test")
+    print("  mnemond MCP Performance & Load Test")
     print("=" * 70)
 
     # Test at different scales

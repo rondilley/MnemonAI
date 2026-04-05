@@ -45,7 +45,7 @@ mnemon_err_t mnemon_log_init(mnemon_log_mode_t mode, mnemon_log_level_t level)
 
 #ifdef HAVE_SYSLOG_H
     if (mode == MNEMON_LOG_MODE_SYSLOG)
-        openlog("mnemon_ai", LOG_PID | LOG_NDELAY, LOG_DAEMON);
+        openlog("mnemond", LOG_PID | LOG_NDELAY, LOG_DAEMON);
 #endif
 
     return MNEMON_OK;

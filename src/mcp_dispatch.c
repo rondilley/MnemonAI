@@ -19,7 +19,7 @@
 #include "mcp_tools.h"
 #include "log.h"
 
-#define MAX_TOOLS 32
+#define MAX_TOOLS 36
 
 typedef struct {
     const char           *name;

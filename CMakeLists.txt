@@ -1,5 +1,5 @@
 # ======================================================================
-#  mnemon_ai -- Persistent, searchable memory for LLM agents via MCP
+#  mnemond -- Persistent, searchable memory for LLM agents via MCP
 #
 #  CMakeLists.txt -- Top-level build configuration
 #
@@ -18,8 +18,12 @@
 
 cmake_minimum_required(VERSION 3.16)
 
-project(mnemon_ai
-    VERSION   0.1.0
+# Version is tracked in the VERSION file (single source of truth)
+file(STRINGS "${CMAKE_SOURCE_DIR}/VERSION" MNEMON_VERSION_STRING LIMIT_COUNT 1)
+string(STRIP "${MNEMON_VERSION_STRING}" MNEMON_VERSION_STRING)
+
+project(mnemond
+    VERSION   ${MNEMON_VERSION_STRING}
     LANGUAGES C CXX
     DESCRIPTION "Persistent searchable memory for LLM agents via MCP"
 )
@@ -30,7 +34,7 @@ project(mnemon_ai
 # Package metadata (autoconf equivalents)
 set(PACKAGE_BUGREPORT "https://github.com/rdilley/MnemonAI/issues")
 set(PACKAGE_URL       "https://github.com/rdilley/MnemonAI")
-set(PACKAGE_TARNAME   "mnemon_ai")
+set(PACKAGE_TARNAME   "mnemond")
 
 # ======================================================================
 #  Build defaults
@@ -60,9 +64,9 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 include(GNUInstallDirs)
 
 # Autoconf-style directory variables
-set(MNEMON_SYSCONFDIR   "${CMAKE_INSTALL_FULL_SYSCONFDIR}/mnemon_ai"
+set(MNEMON_SYSCONFDIR   "${CMAKE_INSTALL_FULL_SYSCONFDIR}/mnemond"
     CACHE PATH "Configuration file directory")
-set(MNEMON_LOCALSTATEDIR "${CMAKE_INSTALL_FULL_LOCALSTATEDIR}/lib/mnemon_ai"
+set(MNEMON_LOCALSTATEDIR "${CMAKE_INSTALL_FULL_LOCALSTATEDIR}/lib/mnemond"
     CACHE PATH "Persistent data directory")
 
 # ======================================================================
@@ -236,6 +240,21 @@ else()
     set(ENABLE_SYSTEMD OFF)
 endif()
 
+# --- libmicrohttpd (HTTP transport) ---
+option(ENABLE_HTTP "Enable HTTP/SSE transport for network MCP access" ON)
+if(ENABLE_HTTP AND PkgConfig_FOUND)
+    pkg_check_modules(MHD QUIET libmicrohttpd)
+    if(MHD_FOUND)
+        set(HAVE_LIBMICROHTTPD 1)
+    else()
+        message(WARNING "libmicrohttpd not found -- HTTP transport disabled. "
+                "Install: sudo apt-get install libmicrohttpd-dev")
+        set(ENABLE_HTTP OFF)
+    endif()
+else()
+    set(ENABLE_HTTP OFF)
+endif()
+
 # --- NUMA ---
 option(ENABLE_NUMA "Enable NUMA-aware memory allocation" ON)
 if(ENABLE_NUMA AND PkgConfig_FOUND)
@@ -305,6 +324,19 @@ check_c_compiler_flag("-mavx2" HAVE_AVX2)
 check_c_compiler_flag("-mavx512f" HAVE_AVX512)
 
 # ======================================================================
+#  Git commit hash (embedded in --version output)
+# ======================================================================
+
+set(MNEMON_GIT_COMMIT "")
+execute_process(
+    COMMAND git rev-parse --short HEAD
+    WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+    OUTPUT_VARIABLE MNEMON_GIT_COMMIT
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+    ERROR_QUIET
+)
+
+# ======================================================================
 #  Generate config.h (autoconf AC_CONFIG_HEADERS equivalent)
 # ======================================================================
 
@@ -364,6 +396,7 @@ set(MNEMON_SOURCES
     src/log.c
     src/id.c
     src/mcp_stdio.c
+    src/mcp_http.c
     src/mcp_dispatch.c
     src/mcp_tools.c
     src/storage.c
@@ -383,19 +416,20 @@ set(MNEMON_SOURCES
     src/admit.c
     src/audit.c
     src/model_mgr.c
+    src/honeypot.c
 )
 
-add_executable(mnemon_ai ${MNEMON_SOURCES} ${SIMD_OBJECTS})
+add_executable(mnemond ${MNEMON_SOURCES} ${SIMD_OBJECTS})
 
-target_compile_definitions(mnemon_ai PRIVATE HAVE_CONFIG_H)
+target_compile_definitions(mnemond PRIVATE HAVE_CONFIG_H)
 
-target_include_directories(mnemon_ai PRIVATE
+target_include_directories(mnemond PRIVATE
     "${CMAKE_BINARY_DIR}"
     "${CMAKE_SOURCE_DIR}/src"
     "${CMAKE_SOURCE_DIR}/simd"
 )
 
-target_link_libraries(mnemon_ai PRIVATE
+target_link_libraries(mnemond PRIVATE
     cjson
     lmdb
     usearch
@@ -407,28 +441,34 @@ target_link_libraries(mnemon_ai PRIVATE
 )
 
 if(ENABLE_SYSTEMD)
-    target_compile_definitions(mnemon_ai PRIVATE ENABLE_SYSTEMD)
-    target_include_directories(mnemon_ai PRIVATE ${SYSTEMD_INCLUDE_DIRS})
-    target_link_libraries(mnemon_ai PRIVATE ${SYSTEMD_LIBRARIES})
+    target_compile_definitions(mnemond PRIVATE ENABLE_SYSTEMD)
+    target_include_directories(mnemond PRIVATE ${SYSTEMD_INCLUDE_DIRS})
+    target_link_libraries(mnemond PRIVATE ${SYSTEMD_LIBRARIES})
 endif()
 
 if(ENABLE_NUMA)
-    target_compile_definitions(mnemon_ai PRIVATE ENABLE_NUMA)
-    target_include_directories(mnemon_ai PRIVATE ${NUMA_INCLUDE_DIRS})
-    target_link_libraries(mnemon_ai PRIVATE ${NUMA_LIBRARIES})
+    target_compile_definitions(mnemond PRIVATE ENABLE_NUMA)
+    target_include_directories(mnemond PRIVATE ${NUMA_INCLUDE_DIRS})
+    target_link_libraries(mnemond PRIVATE ${NUMA_LIBRARIES})
 endif()
 
 if(ENABLE_CURL)
-    target_compile_definitions(mnemon_ai PRIVATE ENABLE_CURL)
-    target_link_libraries(mnemon_ai PRIVATE CURL::libcurl)
+    target_compile_definitions(mnemond PRIVATE ENABLE_CURL)
+    target_link_libraries(mnemond PRIVATE CURL::libcurl)
+endif()
+
+if(ENABLE_HTTP)
+    target_compile_definitions(mnemond PRIVATE ENABLE_HTTP)
+    target_include_directories(mnemond PRIVATE ${MHD_INCLUDE_DIRS})
+    target_link_libraries(mnemond PRIVATE ${MHD_LIBRARIES})
 endif()
 
 if(HAVE_AVX2)
-    target_compile_definitions(mnemon_ai PRIVATE HAVE_AVX2)
+    target_compile_definitions(mnemond PRIVATE HAVE_AVX2)
 endif()
 
 if(HAVE_AVX512)
-    target_compile_definitions(mnemon_ai PRIVATE HAVE_AVX512)
+    target_compile_definitions(mnemond PRIVATE HAVE_AVX512)
 endif()
 
 # ======================================================================
@@ -442,6 +482,7 @@ set(MNEMON_LIB_SOURCES
     src/log.c
     src/id.c
     src/mcp_stdio.c
+    src/mcp_http.c
     src/mcp_dispatch.c
     src/mcp_tools.c
     src/storage.c
@@ -461,6 +502,7 @@ set(MNEMON_LIB_SOURCES
     src/admit.c
     src/audit.c
     src/model_mgr.c
+    src/honeypot.c
 )
 
 add_library(mnemon_core STATIC ${MNEMON_LIB_SOURCES} ${SIMD_OBJECTS})
@@ -491,6 +533,11 @@ endif()
 if(ENABLE_CURL)
     target_compile_definitions(mnemon_core PRIVATE ENABLE_CURL)
     target_link_libraries(mnemon_core PUBLIC CURL::libcurl)
+endif()
+if(ENABLE_HTTP)
+    target_compile_definitions(mnemon_core PRIVATE ENABLE_HTTP)
+    target_include_directories(mnemon_core PUBLIC ${MHD_INCLUDE_DIRS})
+    target_link_libraries(mnemon_core PUBLIC ${MHD_LIBRARIES})
 endif()
 if(HAVE_AVX2)
     target_compile_definitions(mnemon_core PRIVATE HAVE_AVX2)
@@ -531,27 +578,27 @@ endif()
 # ======================================================================
 
 # Binary
-install(TARGETS mnemon_ai
+install(TARGETS mnemond
     RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}"
 )
 
 # Configuration file
-install(FILES etc/mnemon_ai.conf.example
+install(FILES etc/mnemond.conf.example
     DESTINATION "${MNEMON_SYSCONFDIR}"
-    RENAME mnemon_ai.conf.example
+    RENAME mnemond.conf.example
 )
 
 # systemd service file (if systemd is available)
 if(ENABLE_SYSTEMD)
     set(SYSTEMD_UNIT_DIR "${CMAKE_INSTALL_PREFIX}/lib/systemd/system"
         CACHE PATH "systemd unit file directory")
-    install(FILES etc/mnemon_ai.service
+    install(FILES etc/mnemond.service
         DESTINATION "${SYSTEMD_UNIT_DIR}"
     )
 endif()
 
 # Man page (when available)
-# install(FILES doc/mnemon_ai.1
+# install(FILES doc/mnemond.1
 #     DESTINATION "${CMAKE_INSTALL_MANDIR}/man1"
 # )
 

@@ -52,6 +52,12 @@ function(mnemon_print_summary)
         message(STATUS "    libcurl (extraction)  : no")
     endif()
 
+    if(ENABLE_HTTP)
+        message(STATUS "    HTTP transport ...... : yes (libmicrohttpd ${MHD_VERSION})")
+    else()
+        message(STATUS "    HTTP transport ...... : no")
+    endif()
+
     message(STATUS "")
     message(STATUS "  SIMD support:")
 

@@ -17,7 +17,7 @@ import subprocess
 import sys
 import time
 
-BINARY = "./mnemon_ai"
+BINARY = "./mnemond"
 passed = 0
 failed = 0
 
@@ -298,6 +298,27 @@ def main():
     r, ie = call_tool(proc, "rebuild_indexes", {"target": "all"}, 92)
     test("[TOOL] rebuild_indexes: rebuilt array + duration",
          isinstance(r.get("rebuilt"), list) and "duration_ms" in r)
+
+    # ---- 8b. Honeypot Decoy Tools ----
+    print("\n  --- Honeypot Decoys ---")
+
+    r, ie = call_tool(proc, "admin_reset_auth", {"admin_key": "test"}, 93)
+    test("[DECOY] admin_reset_auth: returns error + isError=true",
+         "error" in r and ie == True)
+
+    r, ie = call_tool(proc, "export_all_memories", {}, 94)
+    test("[DECOY] export_all_memories: returns error",
+         "error" in r)
+
+    r, ie = call_tool(proc, "debug_raw_query",
+                      {"query": "SELECT *", "database": "entities"}, 95)
+    test("[DECOY] debug_raw_query: mentions debug mode",
+         "debug" in r.get("error", ""))
+
+    r, ie = call_tool(proc, "set_system_config",
+                      {"key": "auth_token", "value": "hacked"}, 96)
+    test("[DECOY] set_system_config: returns privileges error",
+         "privileges" in r.get("error", ""))
 
     # ---- 9. Import ----
     print("\n  --- Import ---")

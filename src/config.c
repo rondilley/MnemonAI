@@ -48,13 +48,13 @@ static char *strip(char *s)
 
 static void set_defaults(mnemon_config_t *cfg)
 {
-    cfg->data_dir = tilde_expand("~/.local/share/mnemon_ai");
+    cfg->data_dir = tilde_expand("~/.local/share/mnemond");
     cfg->log_level = strdup("info");
     cfg->foreground = false;
     cfg->map_size_gb = 10;
     cfg->max_readers = 64;
     cfg->model_path = tilde_expand(
-        "~/.local/share/mnemon_ai/models/nomic-embed-text-v1.5.Q8_0.gguf");
+        "~/.local/share/mnemond/models/nomic-embed-text-v1.5.Q8_0.gguf");
     cfg->dimensions = 768;
     cfg->batch_size = 32;
     cfg->gpu_layers = 99;
@@ -212,18 +212,18 @@ mnemon_err_t mnemon_config_load(const char *path, mnemon_config_t **out)
         bool found = false;
 
         if (xdg) {
-            snprintf(search, sizeof(search), "%s/mnemon_ai/mnemon_ai.conf", xdg);
+            snprintf(search, sizeof(search), "%s/mnemond/mnemond.conf", xdg);
             if (parse_ini(cfg, search) == MNEMON_OK) found = true;
         }
         if (!found) {
-            char *expanded = tilde_expand("~/.config/mnemon_ai/mnemon_ai.conf");
+            char *expanded = tilde_expand("~/.config/mnemond/mnemond.conf");
             if (expanded) {
                 if (parse_ini(cfg, expanded) == MNEMON_OK) found = true;
                 free(expanded);
             }
         }
         if (!found) {
-            parse_ini(cfg, "/etc/mnemon_ai/mnemon_ai.conf");
+            parse_ini(cfg, "/etc/mnemond/mnemond.conf");
         }
     }
 
