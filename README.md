@@ -71,19 +71,36 @@ See [doc/ARCHITECTURE.md](doc/ARCHITECTURE.md) for the full architecture documen
 
 ## Getting Started
 
+Everything installs under your home directory. No root required. No system files touched.
+
+### What Goes Where
+
+```
+~/.local/
+    bin/mnemond                         # the binary
+    lib/libllama.so, libggml*.so        # llama.cpp libraries
+    share/mnemond/
+        data/                           # LMDB database (memories, entities, edges)
+        fts/                            # SQLite FTS5 keyword index
+        vectors/                        # usearch HNSW vector index
+        models/                         # embedding model (~150MB, auto-downloaded)
+~/.config/mnemond/
+    mnemond.conf                        # configuration (optional -- all settings have defaults)
+```
+
 ### Step 1: Install Build Dependencies
 
 ```bash
 # Ubuntu / Debian
-sudo apt-get install build-essential cmake git
+sudo apt-get install build-essential cmake git libmicrohttpd-dev libcurl4-openssl-dev
 
 # Fedora / RHEL
-sudo dnf install gcc gcc-c++ cmake git
+sudo dnf install gcc gcc-c++ cmake git libmicrohttpd-devel libcurl-devel
 ```
 
-### Step 2: Build and Install llama.cpp
+### Step 2: Build and Install llama.cpp to ~/.local
 
-MnemonAI uses llama.cpp for local embedding generation. Build it from source:
+MnemonAI uses llama.cpp for local embedding generation:
 
 ```bash
 git clone https://github.com/ggerganov/llama.cpp
@@ -95,65 +112,122 @@ make install
 cd ../..
 ```
 
-### Step 3: Build MnemonAI
+### Step 3: Build and Install MnemonAI to ~/.local
 
 ```bash
 git clone https://github.com/rdilley/MnemonAI.git
 cd MnemonAI
 mkdir build && cd build
-cmake .. -DCMAKE_PREFIX_PATH=$HOME/.local
+cmake .. -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH=$HOME/.local -DCMAKE_INSTALL_PREFIX=$HOME/.local
 make -j$(nproc)
+make install
 ```
 
-CMake will print a feature summary showing what was detected. If libcurl is found, entity extraction is enabled. If not, it prints the install command.
+This installs the `mnemond` binary to `~/.local/bin/`. CMake prints a feature summary at the end showing what was detected.
 
-### Step 4: Run Tests
+### Step 4: Add ~/.local/bin to PATH and Set Library Path
+
+Add these to your `~/.bashrc` (or `~/.zshrc`):
 
 ```bash
-ctest --output-on-failure     # 156 C unit tests
-LD_LIBRARY_PATH=$HOME/.local/lib python3 ../test/test_mcp_client.py   # 97 MCP tests
+export PATH="$HOME/.local/bin:$PATH"
+export LD_LIBRARY_PATH="$HOME/.local/lib:$LD_LIBRARY_PATH"
 ```
 
-### Step 5: Install
+Then reload:
 
 ```bash
-sudo make install             # installs to /usr/local/bin/mnemond
+source ~/.bashrc
 ```
 
-Or run from the build directory without installing:
+### Step 5: Verify the Install
 
 ```bash
-LD_LIBRARY_PATH=$HOME/.local/lib ./mnemond --version
+mnemond --version             # should print: mnemond v0.3.0 (...)
+mnemond --check-config        # should print: Configuration is valid.
 ```
 
 ### Step 6: First Run
 
-On first run, mnemond auto-detects your hardware and downloads the recommended embedding model (~140MB from HuggingFace):
+On first run, mnemond auto-detects your hardware and downloads the recommended embedding model (~150MB from HuggingFace):
 
 ```bash
 mnemond --stdio               # starts and downloads model if needed
 ```
 
+Press `Ctrl+C` to stop. The model and data directories are created automatically under `~/.local/share/mnemond/`.
+
 To skip the model download (run without embeddings):
 
 ```bash
-echo "model_path = none" >> ~/.config/mnemond/mnemond.conf
+mkdir -p ~/.config/mnemond
+echo -e "[embedding]\nmodel_path = none" > ~/.config/mnemond/mnemond.conf
 ```
 
-### Step 7: Verify
+### Step 7: Run Tests (Optional)
 
 ```bash
-mnemond --check-config        # validate configuration
-mnemond --version             # show version + git commit
+cd MnemonAI/build
+ctest --output-on-failure                                                  # 196 C unit tests
+LD_LIBRARY_PATH=$HOME/.local/lib python3 ../test/test_mcp_client.py        # 105 MCP tests
 ```
 
 ---
 
-## Deployment Options
+## Auto-Start with systemd (User Service)
 
-### Option A: Local (stdio) -- Single Machine
+Run mnemond as a background daemon that starts automatically on login. No root required -- this uses systemd's per-user service manager.
 
-The MCP client launches `mnemond` as a child process. Communication is over stdin/stdout. No network, no auth, no configuration needed.
+### Step 1: Install the User Service File
+
+A ready-made service file is included in the repo:
+
+```bash
+mkdir -p ~/.config/systemd/user
+cp etc/mnemond-user.service ~/.config/systemd/user/mnemond.service
+```
+
+`%h` in the service file expands to your home directory automatically. The service runs as your user, not root.
+
+### Step 2: Enable and Start
+
+```bash
+systemctl --user daemon-reload
+systemctl --user enable mnemond        # start on login
+systemctl --user start mnemond         # start now
+```
+
+### Step 3: Verify
+
+```bash
+systemctl --user status mnemond        # should show "active (running)"
+journalctl --user -u mnemond -f        # follow logs
+```
+
+### Step 4: Enable Lingering (Optional -- Run Without Login)
+
+By default, user services stop when you log out. To keep mnemond running even when you're not logged in (useful for the HTTP server):
+
+```bash
+loginctl enable-linger $USER
+```
+
+### Managing the Service
+
+```bash
+systemctl --user stop mnemond          # stop
+systemctl --user restart mnemond       # restart (e.g., after config change)
+systemctl --user disable mnemond       # don't start on login
+journalctl --user -u mnemond --since today  # today's logs
+```
+
+---
+
+## Deployment Modes
+
+### Mode A: Local (stdio) -- Single Machine
+
+The MCP client launches `mnemond` as a child process. Communication is over stdin/stdout. No network, no auth, no configuration needed. This is the simplest setup.
 
 ```mermaid
 graph LR
@@ -161,7 +235,7 @@ graph LR
     D --> Storage["LMDB + FTS5 + usearch"]
 ```
 
-### Option B: Network Server (HTTP) -- Multiple Machines, Shared Memory
+### Mode B: Network Server (HTTP) -- Multiple Machines, Shared Memory
 
 Run `mnemond` as a daemon on one machine (e.g., a Framework desktop with GPU/NPU). AI tools on any machine -- Windows, macOS, Linux -- connect to the shared memory server over HTTP. All agents and tools share the same knowledge base.
 
@@ -198,9 +272,7 @@ graph TB
 
 #### Setting Up the Network Server
 
-1. **Install mnemond** on the server (Steps 1-5 above)
-
-2. **Configure for network access:**
+1. **Create a config file with HTTP enabled:**
 
 ```bash
 mkdir -p ~/.config/mnemond
@@ -208,9 +280,6 @@ cat > ~/.config/mnemond/mnemond.conf << 'EOF'
 [general]
 data_dir = ~/.local/share/mnemond
 log_level = info
-
-[lmdb]
-map_size_gb = 10
 
 [embedding]
 # Leave empty for auto-download on first run
@@ -224,20 +293,21 @@ auth_token = YOUR-SECRET-TOKEN-HERE
 EOF
 ```
 
-The `auth_token` is required when binding to non-localhost. Generate one with: `openssl rand -hex 32`
+Generate a token: `openssl rand -hex 32`
 
-3. **Start the server:**
+The `auth_token` is **required** when binding to non-localhost. mnemond refuses to start without one.
+
+2. **Start the server** (or restart the systemd service if already enabled):
 
 ```bash
-# Foreground (see logs on terminal)
-mnemond --foreground
+# If using systemd (recommended):
+systemctl --user restart mnemond
 
-# Or install as a systemd service
-sudo cp etc/mnemond.service /etc/systemd/system/
-sudo systemctl enable --now mnemond
+# Or foreground for debugging:
+mnemond --foreground
 ```
 
-4. **Verify the server is running:**
+3. **Verify the server is running:**
 
 ```bash
 curl -X POST http://localhost:3847/mcp \
@@ -248,13 +318,23 @@ curl -X POST http://localhost:3847/mcp \
 
 You should see a JSON response with `protocolVersion` and `serverInfo`.
 
+4. **Open firewall port** (if connecting from other machines):
+
+```bash
+# Ubuntu (ufw)
+sudo ufw allow 3847/tcp
+
+# Fedora (firewalld)
+sudo firewall-cmd --add-port=3847/tcp --permanent && sudo firewall-cmd --reload
+```
+
 ---
 
 ## Client Configuration
 
 ### Local Mode (stdio)
 
-For AI tools running on the same machine as mnemond. The tool launches mnemond as a child process.
+For AI tools running on the same machine as mnemond. The tool launches mnemond as a child process. If `~/.local/bin` is in your PATH (see Step 4 above), use `mnemond`. Otherwise, use the full path.
 
 #### Claude Code
 
@@ -263,13 +343,16 @@ For AI tools running on the same machine as mnemond. The tool launches mnemond a
   "mcpServers": {
     "mnemond": {
       "command": "mnemond",
-      "args": ["--stdio"]
+      "args": ["--stdio"],
+      "env": {
+        "LD_LIBRARY_PATH": "/home/YOU/.local/lib"
+      }
     }
   }
 }
 ```
 
-Save to `~/.claude/settings.json` or project `.claude/settings.json`.
+Save to `~/.claude/settings.json` or project `.claude/settings.json`. Replace `/home/YOU` with your actual home directory (environment variables like `$HOME` don't expand in JSON).
 
 #### Claude Desktop
 
@@ -279,14 +362,17 @@ Settings > Developer > MCP Servers > Add:
 {
   "mcpServers": {
     "mnemond": {
-      "command": "/usr/local/bin/mnemond",
-      "args": ["--stdio"]
+      "command": "/home/YOU/.local/bin/mnemond",
+      "args": ["--stdio"],
+      "env": {
+        "LD_LIBRARY_PATH": "/home/YOU/.local/lib"
+      }
     }
   }
 }
 ```
 
-Use the full path -- desktop apps don't inherit shell PATH.
+Desktop apps don't inherit shell PATH or LD_LIBRARY_PATH, so use full paths.
 
 #### Cursor
 
@@ -297,7 +383,10 @@ Settings > MCP > Add Server:
   "mcpServers": {
     "mnemond": {
       "command": "mnemond",
-      "args": ["--stdio"]
+      "args": ["--stdio"],
+      "env": {
+        "LD_LIBRARY_PATH": "/home/YOU/.local/lib"
+      }
     }
   }
 }
@@ -312,7 +401,10 @@ In `~/.gemini/settings.json`:
   "mcpServers": {
     "mnemond": {
       "command": "mnemond",
-      "args": ["--stdio"]
+      "args": ["--stdio"],
+      "env": {
+        "LD_LIBRARY_PATH": "/home/YOU/.local/lib"
+      }
     }
   }
 }
@@ -327,11 +419,16 @@ In `~/.codex/config.json`:
   "mcpServers": {
     "mnemond": {
       "command": "mnemond",
-      "args": ["--stdio"]
+      "args": ["--stdio"],
+      "env": {
+        "LD_LIBRARY_PATH": "/home/YOU/.local/lib"
+      }
     }
   }
 }
 ```
+
+**Tip:** If you install llama.cpp system-wide (`sudo make install` in llama.cpp), you don't need the `env` / `LD_LIBRARY_PATH` entries.
 
 ### Network Mode (HTTP)
 
@@ -428,7 +525,7 @@ Same pattern -- point `command` at `mnemond-remote`:
 From any configured client, ask your AI tool to run `health_check`. It should return:
 
 ```json
-{"status": "ok", "version": "v0.1.0 (...)", "storage_ok": true}
+{"status": "ok", "version": "v0.3.0 (...)", "storage_ok": true}
 ```
 
 Or test directly:
@@ -448,12 +545,16 @@ curl -s -X POST http://server:3847/mcp \
 
 ## Configuration
 
-INI format. All settings have defaults. Config search path:
+INI format. **All settings have defaults** -- mnemond works out of the box with zero configuration. A config file is only needed to change defaults (enable HTTP, set auth token, tune search, etc.).
+
+Config search path:
 
 1. `--config <path>` (command line)
 2. `$XDG_CONFIG_HOME/mnemond/mnemond.conf`
 3. `~/.config/mnemond/mnemond.conf`
 4. `/etc/mnemond/mnemond.conf`
+
+Default data directory: `~/.local/share/mnemond/` (created automatically on first run).
 
 See [etc/mnemond.conf.example](etc/mnemond.conf.example) for all options.
 
@@ -528,7 +629,7 @@ max_memory_size_kb = 64               # per-memory content size limit
 
 ## Documentation
 
-- [Architecture](doc/ARCHITECTURE.md) -- full system design (v0.2, peer-reviewed)
+- [Architecture](doc/ARCHITECTURE.md) -- full system design (v0.4, peer-reviewed)
 - [Research Synthesis](doc/research-synthesis.md) -- landscape analysis and academic survey
 - [Landscape Report](doc/memory-mcp-report-v2.md) -- practitioner guide to existing memory MCP servers
 - [Token Efficiency Guide](doc/claude-automation-efficiency-2026.pdf) -- Claude automation and token optimization strategies

@@ -1,0 +1,22 @@
+[Unit]
+Description=mnemond -- Persistent memory for LLM agents via MCP
+Documentation=https://github.com/rdilley/MnemonAI
+After=default.target
+
+[Service]
+Type=notify
+ExecStart=%h/.local/bin/mnemond --foreground
+Environment=LD_LIBRARY_PATH=%h/.local/lib
+Restart=on-failure
+RestartSec=5
+
+# Sandboxing (user-level -- no root privileges needed)
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictRealtime=true
+
+[Install]
+WantedBy=default.target
