@@ -19,6 +19,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <signal.h>
+#include <pthread.h>
 
 #ifdef HAVE_UNISTD_H
 # include <unistd.h>
@@ -44,6 +45,7 @@
 #include "threads.h"
 #include "honeypot.h"
 #include "audit.h"
+#include "embed.h"
 
 /* Long options */
 static struct option long_options[] = {
@@ -55,6 +57,7 @@ static struct option long_options[] = {
     {"no-gpu",          no_argument,       NULL, 'G'},
     {"check-config",    no_argument,       NULL, 'C'},
     {"gen-key",         no_argument,       NULL, 'k'},
+    {"warmup",          no_argument,       NULL, 'W'},
     {"version",         no_argument,       NULL, 'v'},
     {"help",            no_argument,       NULL, 'h'},
     {NULL,              0,                 NULL, 0}
@@ -86,6 +89,8 @@ static void print_usage(const char *progname)
         "  --config FILE       Configuration file path\n"
         "  --rebuild-indexes   Rebuild FTS5 and usearch from LMDB, then exit\n"
         "  --no-gpu            Skip GPU detection\n"
+        "  --warmup            Load model, run one embedding, then exit\n"
+        "                      (triggers ROCm/CUDA JIT compilation)\n"
         "  --check-config      Validate config and exit\n"
         "  --gen-key           Generate MCP auth token and write to config\n"
         "  --version           Print version and exit\n"
@@ -98,6 +103,9 @@ static void print_usage(const char *progname)
 /* Signal flags (set by handlers, acted on in main loop) */
 static volatile sig_atomic_t sig_reload = 0;
 static volatile sig_atomic_t sig_stats = 0;
+static volatile sig_atomic_t sig_term_count = 0;
+
+#define SHUTDOWN_TIMEOUT_SEC 10
 
 static void signal_handler(int sig)
 {
@@ -105,8 +113,27 @@ static void signal_handler(int sig)
         sig_reload = 1;
     else if (sig == SIGUSR1)
         sig_stats = 1;
-    else
+    else {
+        sig_term_count++;
         mnemon_request_shutdown();
+        /* Second SIGTERM/SIGINT = force exit after timeout.
+         * Third = immediate hard exit. */
+        if (sig_term_count >= 3)
+            _exit(128 + sig);
+    }
+}
+
+/* Shutdown watchdog: runs in a detached thread, calls _exit() if
+ * graceful shutdown exceeds SHUTDOWN_TIMEOUT_SEC. */
+static void *shutdown_watchdog(void *arg)
+{
+    (void)arg;
+    sleep(SHUTDOWN_TIMEOUT_SEC);
+    /* If we get here, graceful shutdown is stuck */
+    fprintf(stderr, "mnemond: shutdown timed out after %ds, forcing exit\n",
+            SHUTDOWN_TIMEOUT_SEC);
+    _exit(EXIT_FAILURE);
+    return NULL;
 }
 
 /* Install signal handlers */
@@ -115,10 +142,12 @@ static void setup_signals(void)
     struct sigaction sa;
     memset(&sa, 0, sizeof(sa));
 
-    /* SIGTERM, SIGINT -> graceful shutdown */
+    /* SIGTERM, SIGINT -> graceful shutdown.
+     * SA_RESTART is NOT set so that blocking I/O (fgetc, read, pause)
+     * returns EINTR, allowing the main loop to check g_shutdown. */
     sa.sa_handler = signal_handler;
     sigemptyset(&sa.sa_mask);
-    sa.sa_flags = 0;
+    sa.sa_flags = 0; /* No SA_RESTART -- must interrupt blocking calls */
     sigaction(SIGTERM, &sa, NULL);
     sigaction(SIGINT, &sa, NULL);
 
@@ -395,6 +424,7 @@ int main(int argc, char *argv[])
     bool check_config = false;
     bool gen_key = false;
     bool no_gpu = false;
+    bool warmup = false;
     int opt;
 
     mnemon_config_t *cfg = NULL;
@@ -409,7 +439,7 @@ int main(int argc, char *argv[])
     int exit_code = EXIT_SUCCESS;
 
     /* Parse command-line arguments */
-    while ((opt = getopt_long(argc, argv, "sdfc:rGCkvh", long_options, NULL)) != -1) {
+    while ((opt = getopt_long(argc, argv, "sdfc:rGWCkvh", long_options, NULL)) != -1) {
         switch (opt) {
         case 's': mode = MODE_STDIO; break;
         case 'd': mode = MODE_DAEMON; break;
@@ -417,6 +447,7 @@ int main(int argc, char *argv[])
         case 'c': config_path = optarg; break;
         case 'r': rebuild_indexes = true; break;
         case 'G': no_gpu = true; break;
+        case 'W': warmup = true; break;
         case 'C': check_config = true; break;
         case 'k': gen_key = true; break;
         case 'v':
@@ -489,7 +520,7 @@ int main(int argc, char *argv[])
      *   --foreground: stdout for status, stderr for errors
      *   --daemon:     foreground until fork, then syslog */
     {
-        mnemon_log_mode_t log_mode;
+        mnemon_log_mode_t log_mode = MNEMON_LOG_MODE_STDERR;
         switch (mode) {
         case MODE_STDIO:      log_mode = MNEMON_LOG_MODE_STDERR;     break;
         case MODE_FOREGROUND: log_mode = MNEMON_LOG_MODE_FOREGROUND; break;
@@ -555,6 +586,42 @@ int main(int argc, char *argv[])
             exit_code = EXIT_FAILURE;
         } else {
             mnemon_log(MNEMON_LOG_INFO, "index rebuild complete");
+        }
+        goto cleanup_storage;
+    }
+
+    /* Handle --warmup: load model, run one embedding, exit.
+     * This triggers ROCm/CUDA JIT kernel compilation so subsequent
+     * starts are fast. Can take 5-15 minutes on first run with a
+     * new GPU target (e.g., AMD gfx1151). */
+    if (warmup) {
+        mnemon_embed_t *embed = mnemon_storage_embed(storage);
+        if (!embed) {
+            mnemon_log(MNEMON_LOG_ERROR, "warmup: no embedding model loaded");
+            exit_code = EXIT_FAILURE;
+        } else {
+            mnemon_log(MNEMON_LOG_INFO,
+                       "warmup: running test embedding (this may take several "
+                       "minutes on first run with GPU -- ROCm/CUDA JIT compilation)...");
+            float *test_emb = malloc((size_t)mnemon_embed_dimensions(embed) * sizeof(float));
+            if (test_emb) {
+                err = mnemon_embed_text(embed, "warmup test", 11,
+                                        test_emb, mnemon_embed_dimensions(embed));
+                if (err == MNEMON_OK) {
+                    mnemon_log(MNEMON_LOG_INFO,
+                               "warmup: complete (%d dimensions). "
+                               "GPU kernels are compiled and cached.",
+                               mnemon_embed_dimensions(embed));
+                } else {
+                    mnemon_log(MNEMON_LOG_ERROR, "warmup: embedding failed: %s",
+                               mnemon_err_msg());
+                    exit_code = EXIT_FAILURE;
+                }
+                free(test_emb);
+            } else {
+                mnemon_log(MNEMON_LOG_ERROR, "warmup: OOM");
+                exit_code = EXIT_FAILURE;
+            }
         }
         goto cleanup_storage;
     }
@@ -684,7 +751,18 @@ int main(int argc, char *argv[])
     }
 
     /* --- Shutdown sequence --- */
-    mnemon_log(MNEMON_LOG_INFO, "shutting down...");
+    mnemon_log(MNEMON_LOG_INFO, "shutting down (timeout %ds)...",
+               SHUTDOWN_TIMEOUT_SEC);
+
+    /* Start watchdog thread to force-exit if shutdown hangs */
+    {
+        pthread_t wd;
+        pthread_attr_t attr;
+        pthread_attr_init(&attr);
+        pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
+        pthread_create(&wd, &attr, shutdown_watchdog, NULL);
+        pthread_attr_destroy(&attr);
+    }
 
     if (mode == MODE_FOREGROUND || mode == MODE_DAEMON)
         mnemon_sd_notify_stopping();

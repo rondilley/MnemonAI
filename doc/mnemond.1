@@ -5,7 +5,7 @@
 .\"
 .\" SPDX-License-Identifier: GPL-3.0-only
 .\"
-.TH MNEMOND 1 "2026-04-04" "mnemond" "User Commands"
+.TH MNEMOND 1 "2026-04-05" "mnemond" "User Commands"
 .SH NAME
 mnemond \- persistent, searchable memory daemon for LLM agents via MCP
 .SH SYNOPSIS
@@ -14,6 +14,11 @@ mnemond \- persistent, searchable memory daemon for LLM agents via MCP
 .RB [ \-\-config
 .IR file ]
 .RB [ \-\-no\-gpu ]
+.br
+.B mnemond
+.B \-\-warmup
+.RB [ \-\-config
+.IR file ]
 .br
 .B mnemond
 .B \-\-gen\-key
@@ -86,6 +91,19 @@ Useful after a crash or when upgrading index formats.
 .TP
 .BR \-G ", " \-\-no\-gpu
 Skip GPU/NPU hardware detection at startup.
+.TP
+.BR \-W ", " \-\-warmup
+Load the embedding model, run one test embedding, then exit.
+This triggers ROCm or CUDA just-in-time (JIT) kernel compilation for
+the detected GPU.
+JIT compilation is a one-time cost that can take 5\-15\ minutes for new
+GPU targets (e.g., AMD gfx1151).
+Subsequent starts reuse the cached compiled kernels and complete in
+seconds.
+Run this once after installation before starting the daemon.
+Has no effect if no GPU is detected or if
+.B gpu_layers
+is set to 0.
 .TP
 .BR \-C ", " \-\-check\-config
 Validate the configuration file and exit.
@@ -383,20 +401,47 @@ header.
 Can be generated with
 .BR "\-\-gen\-key" .
 Default: empty (no authentication).
+.TP
+.B tls_cert
+Path to a PEM-encoded TLS certificate file.
+Both
+.B tls_cert
+and
+.B tls_key
+must be set to enable TLS; setting only one is an error.
+Default: empty (no TLS).
+.TP
+.B tls_key
+Path to a PEM-encoded TLS private key file.
+Default: empty (no TLS).
 .SH SIGNALS
 .TP
 .B SIGTERM\fR, \fBSIGINT
 Initiate graceful shutdown.
+The daemon sets a shutdown flag, interrupts any blocking I/O, stops the
+HTTP transport, flushes the write queue, joins reader threads, closes
+storage, and exits.
+A 10-second watchdog thread ensures the process terminates even if
+teardown stalls (e.g., if an external library holds a lock).
+.IP
+Sending
+.B SIGTERM
+a third time causes an immediate
+.BR _exit (2)
+as an emergency escape.
 .TP
 .B SIGHUP
 Reload the configuration file.
-Currently reloads the log level.
+Currently reloads the log level and decay parameters.
+Does not reopen storage or restart the HTTP transport.
 .TP
 .B SIGUSR1
-Dump statistics (memory, entity, edge, and index counts) to the log.
+Dump statistics (memory, entity, edge, and index counts) to the log
+at INFO level.
 .TP
 .B SIGPIPE
 Ignored.
+Stdio write failures are handled at the application level.
 .SH MCP TOOLS
 .B mnemond
 exposes 28 functional MCP tools and 4 honeypot decoy tools.
@@ -442,6 +487,18 @@ Sessions are tracked via the
 header.
 Bearer token authentication is supported.
 Origin validation prevents CSRF.
+TLS is supported when
+.B tls_cert
+and
+.B tls_key
+are configured.
+.IP
+.B POST
+submits JSON-RPC requests and returns JSON responses.
+.B GET
+opens a Server-Sent Events (SSE) stream for server-initiated messages.
+.B DELETE
+terminates a session.
 .SH STORAGE
 LMDB is the source of truth.
 FTS5 (full-text search) and usearch (vector similarity) are derived
@@ -530,11 +587,46 @@ Rebuild indexes after a crash:
 .fi
 .RE
 .PP
+Pre-compile GPU kernels before first use (AMD/NVIDIA only):
+.PP
+.RS
+.nf
+.B "mnemond \-\-warmup"
+.fi
+.RE
+.PP
+Install and enable as a systemd user service:
+.PP
+.RS
+.nf
+.B "mkdir \-p ~/.config/systemd/user"
+.B "cp etc/mnemond\-user.service ~/.config/systemd/user/mnemond.service"
+.B "systemctl \-\-user daemon\-reload"
+.B "systemctl \-\-user enable \-\-now mnemond"
+.fi
+.RE
+.PP
+Reload config without restarting:
+.PP
+.RS
+.nf
+.B "kill \-HUP $(pidof mnemond)"
+.fi
+.RE
+.PP
 Send SIGUSR1 to dump stats:
 .PP
 .RS
 .nf
 .B "kill \-USR1 $(pidof mnemond)"
+.fi
+.RE
+.PP
+Graceful shutdown (with 10-second timeout):
+.PP
+.RS
+.nf
+.B "kill $(pidof mnemond)"
 .fi
 .RE
 .SH SEE ALSO

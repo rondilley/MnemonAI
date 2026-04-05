@@ -14,6 +14,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdint.h>
 #include <sys/stat.h>
 #include <errno.h>
 
@@ -22,6 +23,10 @@
 
 #define SCHEMA_VERSION "1"
 #define EMBED_DIM 768
+
+/* LMDB's MDB_val.mv_data is void* but LMDB never modifies key/value
+ * data passed for reads. This macro avoids -Wcast-qual warnings. */
+#define CONST_CAST(p) ((void *)(uintptr_t)(const void *)(p))
 
 struct mnemon_graph {
     MDB_env *env;
@@ -481,11 +486,11 @@ mnemon_err_t mnemon_graph_open(mnemon_graph_t **out, const char *path,
     mdb_dbi_open(txn, "meta", MDB_CREATE, &g->dbi_meta);
 
     /* Check/set schema version */
-    MDB_val mk = {strlen("schema_version"), (void*)"schema_version"};
+    MDB_val mk = {strlen("schema_version"), CONST_CAST("schema_version")};
     MDB_val mv;
     rc = mdb_get(txn, g->dbi_meta, &mk, &mv);
     if (rc == MDB_NOTFOUND) {
-        mv.mv_data = (void*)SCHEMA_VERSION;
+        mv.mv_data = CONST_CAST(SCHEMA_VERSION);
         mv.mv_size = strlen(SCHEMA_VERSION);
         mdb_put(txn, g->dbi_meta, &mk, &mv, 0);
     }
@@ -537,7 +542,7 @@ mnemon_err_t mnemon_graph_put_entity(mnemon_graph_t *g, MDB_txn *txn, const mnem
 {
     mpk_t m; mpk_init(&m);
     pack_entity(&m, e);
-    MDB_val key = {16, (void*)e->id};
+    MDB_val key = {16, CONST_CAST(e->id)};
     MDB_val val = {m.len, m.buf};
     int rc = mdb_put(txn, g->dbi_entities, &key, &val, 0);
     mpk_free(&m);
@@ -547,7 +552,7 @@ mnemon_err_t mnemon_graph_put_entity(mnemon_graph_t *g, MDB_txn *txn, const mnem
 
 mnemon_err_t mnemon_graph_get_entity(mnemon_graph_t *g, MDB_txn *txn, const uint8_t id[16], mnemon_entity_t *out)
 {
-    MDB_val key = {16, (void*)id};
+    MDB_val key = {16, CONST_CAST(id)};
     MDB_val val;
     int rc = mdb_get(txn, g->dbi_entities, &key, &val);
     if (rc == MDB_NOTFOUND) return MNEMON_ERR_NOT_FOUND;
@@ -559,7 +564,7 @@ mnemon_err_t mnemon_graph_get_entity(mnemon_graph_t *g, MDB_txn *txn, const uint
 
 mnemon_err_t mnemon_graph_del_entity(mnemon_graph_t *g, MDB_txn *txn, const uint8_t id[16])
 {
-    MDB_val key = {16, (void*)id};
+    MDB_val key = {16, CONST_CAST(id)};
     int rc = mdb_del(txn, g->dbi_entities, &key, NULL);
     if (rc == MDB_NOTFOUND) return MNEMON_ERR_NOT_FOUND;
     if (rc) { mnemon_err_set(MNEMON_ERR_LMDB, rc, "%s", mdb_strerror(rc)); return MNEMON_ERR_LMDB; }
@@ -590,7 +595,7 @@ mnemon_err_t mnemon_graph_put_edge(mnemon_graph_t *g, MDB_txn *txn, const mnemon
 
     /* Reverse index: target | type_hash | source -> edge_id */
     uint8_t rev[40]; build_edge_key(rev, e->target_id, e->edge_type, e->source_id);
-    MDB_val rk = {40, rev}, rv = {16, (void*)e->id};
+    MDB_val rk = {40, rev}, rv = {16, CONST_CAST(e->id)};
     if (!rc) rc = mdb_put(txn, g->dbi_edges_rev, &rk, &rv, 0);
 
     mpk_free(&m);
@@ -611,7 +616,7 @@ mnemon_err_t mnemon_graph_get_edges_from(mnemon_graph_t *g, MDB_txn *txn,
     if (rc) return MNEMON_ERR_LMDB;
 
     /* Position at source_id prefix */
-    MDB_val key = {16, (void*)source_id};
+    MDB_val key = {16, CONST_CAST(source_id)};
     MDB_val val;
 
     rc = mdb_cursor_get(cur, &key, &val, MDB_SET_RANGE);
@@ -661,7 +666,7 @@ mnemon_err_t mnemon_graph_get_edges_to(mnemon_graph_t *g, MDB_txn *txn,
     int rc = mdb_cursor_open(txn, g->dbi_edges_rev, &cur);
     if (rc) return MNEMON_ERR_LMDB;
 
-    MDB_val key = {16, (void*)target_id};
+    MDB_val key = {16, CONST_CAST(target_id)};
     MDB_val val;
     rc = mdb_cursor_get(cur, &key, &val, MDB_SET_RANGE);
 
@@ -700,7 +705,7 @@ mnemon_err_t mnemon_graph_put_memory(mnemon_graph_t *g, MDB_txn *txn, const mnem
 {
     mpk_t m; mpk_init(&m);
     pack_memory(&m, mem);
-    MDB_val key = {16, (void*)mem->id};
+    MDB_val key = {16, CONST_CAST(mem->id)};
     MDB_val val = {m.len, m.buf};
     int rc = mdb_put(txn, g->dbi_memories, &key, &val, 0);
     mpk_free(&m);
@@ -710,7 +715,7 @@ mnemon_err_t mnemon_graph_put_memory(mnemon_graph_t *g, MDB_txn *txn, const mnem
 
 mnemon_err_t mnemon_graph_get_memory(mnemon_graph_t *g, MDB_txn *txn, const uint8_t id[16], mnemon_memory_t *out)
 {
-    MDB_val key = {16, (void*)id};
+    MDB_val key = {16, CONST_CAST(id)};
     MDB_val val;
     int rc = mdb_get(txn, g->dbi_memories, &key, &val);
     if (rc == MDB_NOTFOUND) return MNEMON_ERR_NOT_FOUND;
@@ -722,7 +727,7 @@ mnemon_err_t mnemon_graph_get_memory(mnemon_graph_t *g, MDB_txn *txn, const uint
 
 mnemon_err_t mnemon_graph_del_memory(mnemon_graph_t *g, MDB_txn *txn, const uint8_t id[16])
 {
-    MDB_val key = {16, (void*)id};
+    MDB_val key = {16, CONST_CAST(id)};
     int rc = mdb_del(txn, g->dbi_memories, &key, NULL);
     if (rc == MDB_NOTFOUND) return MNEMON_ERR_NOT_FOUND;
     if (rc) { mnemon_err_set(MNEMON_ERR_LMDB, rc, "%s", mdb_strerror(rc)); return MNEMON_ERR_LMDB; }
@@ -851,7 +856,7 @@ mnemon_err_t mnemon_graph_put_intent(mnemon_graph_t *g, MDB_txn *txn,
     mpk_str(&m,"pl"); if (payload) mpk_bin(&m, payload, payload_len); else mpk_u8(&m, 0xc0);
     mpk_str(&m,"v");  mpk_uint32(&m, 1);
 
-    MDB_val key = {16, (void*)id};
+    MDB_val key = {16, CONST_CAST(id)};
     MDB_val val = {m.len, m.buf};
     int rc = mdb_put(txn, g->dbi_intents, &key, &val, 0);
     mpk_free(&m);
@@ -867,7 +872,7 @@ mnemon_err_t mnemon_graph_update_intent(mnemon_graph_t *g, MDB_txn *txn,
 
 mnemon_err_t mnemon_graph_del_intent(mnemon_graph_t *g, MDB_txn *txn, const uint8_t id[16])
 {
-    MDB_val key = {16, (void*)id};
+    MDB_val key = {16, CONST_CAST(id)};
     int rc = mdb_del(txn, g->dbi_intents, &key, NULL);
     if (rc && rc != MDB_NOTFOUND) return MNEMON_ERR_LMDB;
     return MNEMON_OK;
@@ -876,7 +881,7 @@ mnemon_err_t mnemon_graph_del_intent(mnemon_graph_t *g, MDB_txn *txn, const uint
 /* Meta */
 mnemon_err_t mnemon_graph_get_meta(mnemon_graph_t *g, MDB_txn *txn, const char *key, char *buf, size_t buf_len)
 {
-    MDB_val mk = {strlen(key), (void*)key};
+    MDB_val mk = {strlen(key), CONST_CAST(key)};
     MDB_val mv;
     int rc = mdb_get(txn, g->dbi_meta, &mk, &mv);
     if (rc == MDB_NOTFOUND) return MNEMON_ERR_NOT_FOUND;
@@ -889,8 +894,8 @@ mnemon_err_t mnemon_graph_get_meta(mnemon_graph_t *g, MDB_txn *txn, const char *
 
 mnemon_err_t mnemon_graph_put_meta(mnemon_graph_t *g, MDB_txn *txn, const char *key, const char *value)
 {
-    MDB_val mk = {strlen(key), (void*)key};
-    MDB_val mv = {strlen(value), (void*)value};
+    MDB_val mk = {strlen(key), CONST_CAST(key)};
+    MDB_val mv = {strlen(value), CONST_CAST(value)};
     int rc = mdb_put(txn, g->dbi_meta, &mk, &mv, 0);
     if (rc) return MNEMON_ERR_LMDB;
     return MNEMON_OK;

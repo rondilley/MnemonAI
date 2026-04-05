@@ -319,7 +319,7 @@ mnemon_err_t mnemon_vector_search(mnemon_vector_t *v, const float *query,
 {
     usearch_error_t err = NULL;
     usearch_index_t idx;
-    const keymap_t *map;
+    keymap_t *map;
 
     if (!v || !query || !out) return MNEMON_ERR_INVALID_INPUT;
     if (dimensions != v->dimensions) return MNEMON_ERR_INVALID_INPUT;

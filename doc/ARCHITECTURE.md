@@ -1121,11 +1121,12 @@ graph TD
 
 ### 8.2 Shutdown Sequence
 
-Triggered by SIGTERM, SIGINT, or fatal condition.
+Triggered by SIGTERM, SIGINT, or fatal condition. A watchdog thread enforces a 10-second timeout -- if graceful shutdown stalls (e.g., llama.cpp holding a lock, MHD connection draining), the process calls `_exit()`.
 
 ```mermaid
 graph TD
-    A["Set shutdown flag<br/>(_Atomic bool = true)"] --> B[Signal consolidation thread]
+    A["Set shutdown flag<br/>(_Atomic bool = true)"] --> WD[Start 10s watchdog thread]
+    WD --> B[Signal consolidation thread]
     B --> C[Consolidation thread exits]
     C --> D[Flush write queue]
     D --> E[Writer thread exits]
@@ -1137,19 +1138,22 @@ graph TD
     J --> K[Remove PID file]
     K --> L["sd_notify STOPPING=1"]
     L --> M[exit 0]
+    WD -. "10s timeout" .-> FORCE["_exit(1)<br/>forced shutdown"]
 ```
 
 ### 8.3 Signal Handling
 
 | Signal | Action |
 |--------|--------|
-| SIGTERM | Graceful shutdown |
-| SIGINT | Graceful shutdown |
+| SIGTERM (1st) | Graceful shutdown: set `g_shutdown` flag, interrupt blocking I/O |
+| SIGTERM (3rd) | Immediate `_exit(128 + sig)` -- emergency escape |
+| SIGINT | Same as SIGTERM |
 | SIGHUP | Reload configuration (re-read INI file, apply safe changes: log level, consolidation params, decay params. Does NOT change data_dir or reopen storage.) |
 | SIGUSR1 | Dump stats to log at INFO level |
 | SIGPIPE | Ignored (SIG_IGN) -- stdio write failures handled at application level |
+| SIGKILL | Kernel kills immediately (always works, not catchable) |
 
-Signals are handled via `sigwait()` in the main thread with all signals blocked in other threads. This is the POSIX-correct approach for multi-threaded daemons.
+**Implementation:** Signal handlers use `sigaction()` with `SA_RESTART` deliberately **not** set. This ensures blocking calls (`fgetc`, `pause`, `read`) return `EINTR` when a signal arrives, allowing the main loop to check `g_shutdown` and exit promptly. A detached watchdog thread starts on shutdown and calls `_exit()` after 10 seconds if graceful teardown stalls.
 
 ### 8.4 systemd Unit File
 
@@ -1723,6 +1727,10 @@ llama.cpp rebuilt with ROCm HIP for AMD GPU embedding acceleration. True batch e
 ### Phase 9: Integration and Gap Closure -- **Complete**
 
 Parallel search dispatch (reader pool + ad-hoc pthreads), TLS cert/key config in `[http]` section, SSE streaming GET endpoint with per-session event queues, recursive directory imports with depth limit, background import job tracking (async + `get_import_status`), injection scanner wired into `store_memory`, auth brute-force wired into HTTP `check_auth`, entity merging during consolidation, persistent reader pool (`[threads] reader_pool_size`).
+
+### Phase 10: Signal Handling and Operational Hardening -- **Complete**
+
+Robust signal handling: `SA_RESTART` not set so SIGTERM/SIGINT interrupt blocking I/O immediately. Shutdown watchdog thread forces `_exit()` after 10s if graceful teardown stalls. Escalating SIGTERM (1st=graceful, 3rd=immediate `_exit`). `--warmup` CLI flag triggers GPU JIT compilation without starting the daemon. llama.cpp verbose output suppressed via `llama_log_set()` callback (INFO/DEBUG -> our DEBUG level, hidden at default `log_level=info`).
 
 ### Remaining Work
 

@@ -18,6 +18,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <signal.h>
+#include <errno.h>
 
 #ifdef HAVE_UNISTD_H
 # include <unistd.h>
@@ -41,12 +42,25 @@ static int stdio_read_request(void *ctx, cJSON **out)
     line_buf_t *lb = (line_buf_t *)ctx;
     lb->len = 0;
 
-    /* Read until newline or EOF */
+    /* Read until newline or EOF.
+     * fgetc returns EOF on both real EOF and when interrupted by a signal
+     * (EINTR). Check ferror+errno to distinguish, and check shutdown flag. */
     while (1) {
         if (lb->len >= lb->cap - 1) return -1; /* overflow */
 
         int c = fgetc(stdin);
-        if (c == EOF) return -1;
+        if (c == EOF) {
+            if (feof(stdin)) return -1;  /* Real EOF */
+            if (ferror(stdin)) {
+                if (errno == EINTR) {
+                    clearerr(stdin);
+                    if (mnemon_shutdown_requested()) return -1;
+                    continue; /* Retry after non-shutdown signal (e.g., SIGHUP) */
+                }
+                return -1; /* I/O error */
+            }
+            return -1;
+        }
         if (c == '\n') break;
         lb->buf[lb->len++] = (char)c;
     }
@@ -90,12 +104,6 @@ mnemon_err_t mnemon_mcp_stdio_init(mnemon_transport_t *transport)
 
     /* Ignore SIGPIPE */
     signal(SIGPIPE, SIG_IGN);
-
-    line_buf_t *lb = calloc(1, sizeof(*lb));
-    if (!lb) return MNEMON_ERR_OOM;
-    lb->buf = malloc(READ_BUF_SIZE);
-    if (!lb->buf) { free(lb); return MNEMON_ERR_OOM; }
-    lb->cap = READ_BUF_SIZE;
 
     transport->read_request = stdio_read_request;
     transport->write_response = stdio_write_response;

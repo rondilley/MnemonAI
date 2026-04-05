@@ -609,7 +609,6 @@ mnemon_err_t mnemon_replay_intents(mnemon_storage_t *s)
         return MNEMON_OK; /* Can't read, skip */
 
     /* Open cursor on intents DB */
-    MDB_env *env = mnemon_graph_env(s->graph);
     MDB_dbi dbi;
     rc = mdb_dbi_open(txn, "intents", 0, &dbi);
     if (rc != 0) {

@@ -340,7 +340,8 @@ static void test_search_keyword(void)
     /* Store a distinctive memory first */
     cJSON *sa = cJSON_CreateObject();
     cJSON_AddStringToObject(sa, "content", "PostgreSQL supports JSONB columns natively");
-    call_tool("store_memory", sa, 130);
+    cJSON *store_r = call_tool("store_memory", sa, 130);
+    cJSON_Delete(store_r);
 
     cJSON *args = cJSON_CreateObject();
     cJSON_AddStringToObject(args, "query", "PostgreSQL JSONB");
@@ -760,7 +761,7 @@ static void test_import_directory(void)
     mkdir(subdir, 0700);
 
     for (int i = 0; i < 3; i++) {
-        char fp[512];
+        char fp[1024];
         snprintf(fp, sizeof(fp), "%s/doc_%d.txt", subdir, i);
         FILE *f = fopen(fp, "w");
         fprintf(f, "Document %d content for directory import test.\n", i);

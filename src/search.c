@@ -268,6 +268,10 @@ static mnemon_err_t build_results(mnemon_storage_t *s,
     return MNEMON_OK;
 }
 
+/* Thin wrappers matching reader_task_fn (void(*)(void*)) signature */
+static void vector_ranker_task(void *arg) { vector_ranker_fn(arg); }
+static void keyword_ranker_task(void *arg) { keyword_ranker_fn(arg); }
+
 mnemon_err_t mnemon_search_hybrid(mnemon_storage_t *s,
                                   const mnemon_query_t *q,
                                   mnemon_result_set_t *out)
@@ -335,7 +339,7 @@ mnemon_err_t mnemon_search_hybrid(mnemon_storage_t *s,
         bool vec_submitted = false, kw_submitted = false;
 
         if (query_emb) {
-            vec_task.fn = (reader_task_fn)vector_ranker_fn;
+            vec_task.fn = vector_ranker_task;
             vec_task.arg = &varg;
             if (mnemon_reader_pool_submit(pool, &vec_task) == MNEMON_OK)
                 vec_submitted = true;
@@ -343,7 +347,7 @@ mnemon_err_t mnemon_search_hybrid(mnemon_storage_t *s,
                 vector_ranker_fn(&varg);
         }
         if (q->query_text) {
-            kw_task.fn = (reader_task_fn)keyword_ranker_fn;
+            kw_task.fn = keyword_ranker_task;
             kw_task.arg = &karg;
             if (mnemon_reader_pool_submit(pool, &kw_task) == MNEMON_OK)
                 kw_submitted = true;

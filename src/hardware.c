@@ -207,14 +207,21 @@ static void detect_nvidia_gpu(mnemon_hardware_t *hw)
     typedef int (*nvmlDeviceGetHandleByIndex_fn)(unsigned int, void **);
     typedef int (*nvmlDeviceGetName_fn)(void *, char *, unsigned int);
 
-    nvmlInit_fn init = (nvmlInit_fn)dlsym(nvml, "nvmlInit_v2");
-    nvmlShutdown_fn shutdown_fn = (nvmlShutdown_fn)dlsym(nvml, "nvmlShutdown");
-    nvmlDeviceGetCount_fn get_count =
-        (nvmlDeviceGetCount_fn)dlsym(nvml, "nvmlDeviceGetCount_v2");
-    nvmlDeviceGetHandleByIndex_fn get_handle =
-        (nvmlDeviceGetHandleByIndex_fn)dlsym(nvml, "nvmlDeviceGetHandleByIndex_v2");
-    nvmlDeviceGetName_fn get_name =
-        (nvmlDeviceGetName_fn)dlsym(nvml, "nvmlDeviceGetName");
+    /* dlsym returns void* which ISO C forbids casting to function pointers.
+     * Use memcpy to avoid -Wpedantic warning (POSIX guarantees same size). */
+    nvmlInit_fn init;
+    nvmlShutdown_fn shutdown_fn;
+    nvmlDeviceGetCount_fn get_count;
+    nvmlDeviceGetHandleByIndex_fn get_handle;
+    nvmlDeviceGetName_fn get_name;
+    {
+        void *sym;
+        sym = dlsym(nvml, "nvmlInit_v2");          memcpy(&init, &sym, sizeof(sym));
+        sym = dlsym(nvml, "nvmlShutdown");          memcpy(&shutdown_fn, &sym, sizeof(sym));
+        sym = dlsym(nvml, "nvmlDeviceGetCount_v2"); memcpy(&get_count, &sym, sizeof(sym));
+        sym = dlsym(nvml, "nvmlDeviceGetHandleByIndex_v2"); memcpy(&get_handle, &sym, sizeof(sym));
+        sym = dlsym(nvml, "nvmlDeviceGetName");     memcpy(&get_name, &sym, sizeof(sym));
+    }
 
     if (!init || !get_count || !get_handle || !get_name) {
         dlclose(nvml);

@@ -32,6 +32,37 @@ struct mnemon_embed {
     bool                  initialized;
 };
 
+/* Route llama.cpp log messages through our logger.
+ * WARN/ERROR -> our WARN/ERROR.  INFO/DEBUG -> our DEBUG (suppresses
+ * the very verbose per-tensor and metadata dumps during model load). */
+static void llama_log_callback(enum ggml_log_level level, const char *text,
+                                void *user_data)
+{
+    (void)user_data;
+    if (!text || text[0] == '\0' || text[0] == '\n') return;
+
+    /* Strip trailing newline */
+    size_t len = strlen(text);
+    char buf[512];
+    if (len >= sizeof(buf)) len = sizeof(buf) - 1;
+    memcpy(buf, text, len);
+    while (len > 0 && (buf[len-1] == '\n' || buf[len-1] == '\r')) len--;
+    buf[len] = '\0';
+    if (len == 0) return;
+
+    switch (level) {
+    case GGML_LOG_LEVEL_ERROR:
+        mnemon_log(MNEMON_LOG_ERROR, "llama: %s", buf);
+        break;
+    case GGML_LOG_LEVEL_WARN:
+        mnemon_log(MNEMON_LOG_WARNING, "llama: %s", buf);
+        break;
+    default:
+        mnemon_log(MNEMON_LOG_DEBUG, "llama: %s", buf);
+        break;
+    }
+}
+
 /* L2 normalize using SIMD dot product for the norm computation.
  * g_simd_ops.dot_product uses AVX-512 (16 floats/cycle) or AVX2 (8 floats/cycle)
  * instead of scalar (1 float/cycle). At 768 dimensions this is a ~16x speedup
@@ -80,6 +111,10 @@ mnemon_err_t mnemon_embed_init(mnemon_embed_t **out, const char *model_path,
     }
     fclose(fp);
 
+    /* Suppress verbose llama.cpp output (per-tensor, metadata dumps).
+     * WARN/ERROR still logged; INFO/DEBUG go to our debug level. */
+    llama_log_set(llama_log_callback, NULL);
+
     llama_backend_init();
 
     /* Load model */
@@ -87,7 +122,7 @@ mnemon_err_t mnemon_embed_init(mnemon_embed_t **out, const char *model_path,
     mparams.n_gpu_layers = gpu_layers;
 
     mnemon_log(MNEMON_LOG_INFO, "loading embedding model: %s", model_path);
-    e->model = llama_load_model_from_file(model_path, mparams);
+    e->model = llama_model_load_from_file(model_path, mparams);
     if (!e->model) {
         mnemon_err_set(MNEMON_ERR_EMBED, 0,
                        "failed to load model: %s", model_path);
@@ -96,7 +131,7 @@ mnemon_err_t mnemon_embed_init(mnemon_embed_t **out, const char *model_path,
         return MNEMON_ERR_EMBED;
     }
 
-    e->n_embd = llama_n_embd(e->model);
+    e->n_embd = llama_model_n_embd(e->model);
     mnemon_log(MNEMON_LOG_INFO, "embedding model loaded: %d dimensions",
                e->n_embd);
 
@@ -108,10 +143,10 @@ mnemon_err_t mnemon_embed_init(mnemon_embed_t **out, const char *model_path,
     cparams.n_threads_batch = cparams.n_threads;
     cparams.embeddings = true;
 
-    e->ctx = llama_new_context_with_model(e->model, cparams);
+    e->ctx = llama_init_from_model(e->model, cparams);
     if (!e->ctx) {
         mnemon_err_set(MNEMON_ERR_EMBED, 0, "failed to create context");
-        llama_free_model(e->model);
+        llama_model_free(e->model);
         llama_backend_free();
         free(e);
         return MNEMON_ERR_EMBED;
@@ -126,7 +161,7 @@ void mnemon_embed_free(mnemon_embed_t *e)
 {
     if (!e) return;
     if (e->ctx) llama_free(e->ctx);
-    if (e->model) llama_free_model(e->model);
+    if (e->model) llama_model_free(e->model);
     if (e->initialized) llama_backend_free();
     free(e);
 }
@@ -152,8 +187,9 @@ mnemon_err_t mnemon_embed_text(mnemon_embed_t *e, const char *text,
     llama_token *tokens = malloc((size_t)max_tokens * sizeof(llama_token));
     if (!tokens) return MNEMON_ERR_OOM;
 
-    n_tokens = llama_tokenize(e->model, text, (int32_t)text_len,
-                              tokens, max_tokens, true, false);
+    n_tokens = llama_tokenize(llama_model_get_vocab(e->model), text,
+                              (int32_t)text_len, tokens, max_tokens,
+                              true, false);
     if (n_tokens < 0) {
         mnemon_err_set(MNEMON_ERR_EMBED, 0, "tokenization failed");
         free(tokens);
@@ -243,7 +279,7 @@ mnemon_err_t mnemon_embed_batch(mnemon_embed_t *e, const char **texts,
     int total_tokens = 0;
     for (size_t i = 0; i < count; i++) {
         token_offsets[i] = total_tokens;
-        int n = llama_tokenize(e->model, texts[i], (int32_t)text_lens[i],
+        int n = llama_tokenize(llama_model_get_vocab(e->model), texts[i], (int32_t)text_lens[i],
                                all_tokens + total_tokens,
                                max_tokens_per_text, true, false);
         if (n < 0) n = 0;

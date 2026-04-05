@@ -147,7 +147,7 @@ mnemond --version             # should print: mnemond v0.3.0 (...)
 mnemond --check-config        # should print: Configuration is valid.
 ```
 
-### Step 6: First Run
+### Step 6: First Run and Model Download
 
 On first run, mnemond auto-detects your hardware and downloads the recommended embedding model (~150MB from HuggingFace):
 
@@ -164,7 +164,32 @@ mkdir -p ~/.config/mnemond
 echo -e "[embedding]\nmodel_path = none" > ~/.config/mnemond/mnemond.conf
 ```
 
-### Step 7: Run Tests (Optional)
+### Step 7: GPU Warmup (AMD/NVIDIA GPU Only)
+
+If you have an AMD or NVIDIA GPU and built llama.cpp with ROCm or CUDA, the first embedding triggers JIT (just-in-time) compilation of GPU kernels for your specific GPU. **This is a one-time cost** but can take 5-15 minutes depending on the GPU target. Subsequent starts are fast (~2 seconds).
+
+Run the warmup before starting the daemon so you can see progress:
+
+```bash
+mnemond --warmup
+```
+
+This loads the model, compiles GPU kernels, runs one test embedding, and exits. You'll see output like:
+
+```
+2026-04-05T05:18:56Z [INFO] mnemond 0.3.0 starting
+2026-04-05T05:18:56Z [INFO] CPU: AMD RYZEN AI MAX+ 395 w/ Radeon 8060S (32 cores) SIMD: avx512
+2026-04-05T05:18:56Z [INFO] loading embedding model: ~/.local/share/mnemond/models/nomic-embed-text-v1.5.Q8_0.gguf
+2026-04-05T05:18:56Z [INFO] embedding model loaded: 768 dimensions
+2026-04-05T05:18:56Z [INFO] warmup: running test embedding (this may take several minutes on first run with GPU -- ROCm/CUDA JIT compilation)...
+2026-04-05T05:28:12Z [INFO] warmup: complete (768 dimensions). GPU kernels are compiled and cached.
+```
+
+**No GPU?** Skip this step -- CPU inference starts instantly with no JIT step.
+
+**Want verbose model loading details?** Set `log_level = debug` in `~/.config/mnemond/mnemond.conf` to see per-tensor and metadata output. At the default `info` level, llama.cpp's verbose output is suppressed.
+
+### Step 8: Run Tests (Optional)
 
 ```bash
 cd MnemonAI/build
@@ -215,11 +240,23 @@ loginctl enable-linger $USER
 ### Managing the Service
 
 ```bash
-systemctl --user stop mnemond          # stop
+systemctl --user stop mnemond          # graceful stop (SIGTERM, 10s timeout)
 systemctl --user restart mnemond       # restart (e.g., after config change)
 systemctl --user disable mnemond       # don't start on login
 journalctl --user -u mnemond --since today  # today's logs
+kill -HUP $(pgrep mnemond)            # reload config without restart
+kill -USR1 $(pgrep mnemond)           # dump stats to log
 ```
+
+### Signal Reference
+
+| Signal | Action |
+|--------|--------|
+| `SIGTERM` | Graceful shutdown (10s timeout, then forced exit) |
+| `SIGINT` | Same as SIGTERM |
+| `SIGHUP` | Reload config (log level, decay params) without restart |
+| `SIGUSR1` | Dump memory/entity/index stats to log |
+| 3x `SIGTERM` | Immediate forced exit (emergency) |
 
 ---
 

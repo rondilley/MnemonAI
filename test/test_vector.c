@@ -184,7 +184,7 @@ static void test_save_load(void)
 static void test_empty_search(void)
 {
     TEST("search on empty index returns 0 results");
-    char empty[256];
+    char empty[512];
     snprintf(empty, sizeof(empty), "%s/empty_%d", tmpdir, getpid());
     mkdir(empty, 0700);
 

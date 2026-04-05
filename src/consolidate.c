@@ -188,7 +188,6 @@ mnemon_err_t mnemon_consolidate(mnemon_storage_t *s,
                 /* Compare against existing cluster representatives */
                 bool assigned = false;
                 for (int j = 0; j < i; j++) {
-                    if (cluster_id[j] != cluster_id[j]) continue; /* not a rep */
                     if (!embeddings[j]) continue;
 
                     float dist = embedding_distance(embeddings[i], embeddings[j], dims);

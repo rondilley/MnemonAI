@@ -487,7 +487,7 @@ static enum MHD_Result request_handler(void *cls,
     if (*upload_data_size > 0) {
         /* Accumulate POST body */
         if (upload->len + *upload_data_size > MAX_POST_SIZE) {
-            return respond_error(conn, MHD_HTTP_PAYLOAD_TOO_LARGE,
+            return respond_error(conn, MHD_HTTP_CONTENT_TOO_LARGE,
                                  "request body too large");
         }
         if (upload->len + *upload_data_size >= upload->cap) {
@@ -598,8 +598,18 @@ mnemon_err_t mnemon_http_start(mnemon_http_t **out,
             free(h);
             return MNEMON_ERR_OOM;
         }
-        fread(h->tls_cert_mem, 1, (size_t)cert_len, cf); h->tls_cert_mem[cert_len] = '\0';
-        fread(h->tls_key_mem, 1, (size_t)key_len, kf); h->tls_key_mem[key_len] = '\0';
+        if (fread(h->tls_cert_mem, 1, (size_t)cert_len, cf) != (size_t)cert_len ||
+            fread(h->tls_key_mem, 1, (size_t)key_len, kf) != (size_t)key_len) {
+            fclose(cf); fclose(kf);
+            free(h->tls_cert_mem); free(h->tls_key_mem);
+            free(h->auth_token); free(h->mcp_path);
+            pthread_mutex_destroy(&h->session_mutex);
+            free(h);
+            mnemon_err_set(MNEMON_ERR_IO, 0, "short read on TLS cert/key files");
+            return MNEMON_ERR_IO;
+        }
+        h->tls_cert_mem[cert_len] = '\0';
+        h->tls_key_mem[key_len] = '\0';
         fclose(cf);
         fclose(kf);
 

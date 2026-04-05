@@ -718,6 +718,7 @@ static cJSON *tool_get_entity_graph(mnemon_storage_t *s, const cJSON *params)
 
     int depth = json_int(params, "depth", 2);
     if (depth > 5) depth = 5;
+    (void)depth; /* TODO: wire into BFS traversal limit */
 
     /* Get the root entity */
     mnemon_entity_t root = {0};
