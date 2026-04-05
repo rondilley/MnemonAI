@@ -54,6 +54,21 @@ set(CMAKE_C_EXTENSIONS OFF)
 # Position-independent code (needed for shared libraries, good practice)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
+# RPATH: embed library search paths so binaries find llama.cpp/ggml libs
+# without requiring LD_LIBRARY_PATH at runtime (build tree and install tree).
+# Use RPATH (not RUNPATH) so transitive dependencies (e.g., libggml.so ->
+# libggml-hip.so) inherit the search path. RUNPATH does not propagate.
+set(CMAKE_BUILD_RPATH_USE_ORIGIN ON)
+set(CMAKE_INSTALL_RPATH_USE_LINK_PATH ON)
+if(CMAKE_PREFIX_PATH)
+    foreach(prefix ${CMAKE_PREFIX_PATH})
+        list(APPEND CMAKE_BUILD_RPATH "${prefix}/lib")
+        list(APPEND CMAKE_INSTALL_RPATH "${prefix}/lib")
+    endforeach()
+endif()
+# Force DT_RPATH instead of DT_RUNPATH for transitive dependency resolution.
+add_link_options("-Wl,--disable-new-dtags")
+
 # Export compile_commands.json for editors / clang-tidy
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 

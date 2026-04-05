@@ -4,18 +4,17 @@ Documentation=https://github.com/rdilley/MnemonAI
 After=default.target
 
 [Service]
-Type=notify
+Type=simple
 ExecStart=%h/.local/bin/mnemond --foreground
 Environment=LD_LIBRARY_PATH=%h/.local/lib
 Restart=on-failure
 RestartSec=5
 
-# Sandboxing (user-level -- no root privileges needed)
+# Note: Most sandboxing directives (ProtectKernelTunables, ProtectKernelModules,
+# ProtectControlGroups, PrivateTmp) require root/system-level services and will
+# cause "Failed to drop capabilities" (exit 218) in user services. Only
+# directives that work without elevated privileges are used here.
 NoNewPrivileges=true
-PrivateTmp=true
-ProtectKernelTunables=true
-ProtectKernelModules=true
-ProtectControlGroups=true
 RestrictRealtime=true
 
 [Install]

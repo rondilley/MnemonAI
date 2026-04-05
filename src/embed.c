@@ -115,13 +115,31 @@ mnemon_err_t mnemon_embed_init(mnemon_embed_t **out, const char *model_path,
      * WARN/ERROR still logged; INFO/DEBUG go to our debug level. */
     llama_log_set(llama_log_callback, NULL);
 
+    /* When GPU is not requested, hide GPU devices from the HIP/CUDA runtime
+     * entirely. Without this, the ROCm runtime initializes during
+     * llama_backend_init() and can hang on certain GPU targets (e.g.,
+     * gfx1151) even when gpu_layers=0. */
+    if (gpu_layers <= 0) {
+        setenv("HIP_VISIBLE_DEVICES", "-1", 0);   /* 0 = don't overwrite */
+        setenv("CUDA_VISIBLE_DEVICES", "-1", 0);
+    }
+
     llama_backend_init();
 
     /* Load model */
     struct llama_model_params mparams = llama_model_default_params();
     mparams.n_gpu_layers = gpu_layers;
 
-    mnemon_log(MNEMON_LOG_INFO, "loading embedding model: %s", model_path);
+    if (gpu_layers > 0) {
+        mnemon_log(MNEMON_LOG_INFO,
+            "loading embedding model with GPU offload (gpu_layers=%d): %s",
+            gpu_layers, model_path);
+        mnemon_log(MNEMON_LOG_INFO,
+            "first run compiles GPU kernels -- this may take several minutes, "
+            "please wait...");
+    } else {
+        mnemon_log(MNEMON_LOG_INFO, "loading embedding model: %s", model_path);
+    }
     e->model = llama_model_load_from_file(model_path, mparams);
     if (!e->model) {
         mnemon_err_set(MNEMON_ERR_EMBED, 0,
@@ -135,13 +153,20 @@ mnemon_err_t mnemon_embed_init(mnemon_embed_t **out, const char *model_path,
     mnemon_log(MNEMON_LOG_INFO, "embedding model loaded: %d dimensions",
                e->n_embd);
 
-    /* Create context */
+    /* Create context -- this triggers GPU JIT kernel compilation on first
+     * run with ROCm/CUDA. Can take minutes for new GPU targets. */
     struct llama_context_params cparams = llama_context_default_params();
     cparams.n_ctx = 2048;
     cparams.n_batch = 512;
     cparams.n_threads = n_threads > 0 ? (uint32_t)n_threads : 4;
     cparams.n_threads_batch = cparams.n_threads;
     cparams.embeddings = true;
+
+    if (gpu_layers > 0) {
+        mnemon_log(MNEMON_LOG_INFO,
+            "creating GPU context (first run compiles GPU kernels -- "
+            "this may take several minutes, please wait)...");
+    }
 
     e->ctx = llama_init_from_model(e->model, cparams);
     if (!e->ctx) {
@@ -151,6 +176,9 @@ mnemon_err_t mnemon_embed_init(mnemon_embed_t **out, const char *model_path,
         free(e);
         return MNEMON_ERR_EMBED;
     }
+
+    mnemon_log(MNEMON_LOG_INFO, "embedding context ready (gpu_layers=%d)",
+               gpu_layers);
 
     e->initialized = true;
     *out = e;
@@ -196,7 +224,9 @@ mnemon_err_t mnemon_embed_text(mnemon_embed_t *e, const char *text,
         return MNEMON_ERR_EMBED;
     }
 
-    /* Build batch */
+    /* Build batch -- llama_batch_init allocates seq_id[i] arrays internally,
+     * so write into them rather than replacing the pointers (which would
+     * cause llama_batch_free to free invalid pointers). */
     struct llama_batch batch = llama_batch_init(n_tokens, 0, 1);
     batch.n_tokens = n_tokens;
 
@@ -204,7 +234,7 @@ mnemon_err_t mnemon_embed_text(mnemon_embed_t *e, const char *text,
         batch.token[i] = tokens[i];
         batch.pos[i] = i;
         batch.n_seq_id[i] = 1;
-        batch.seq_id[i] = (llama_seq_id *[]){&(llama_seq_id){0}}[0];
+        batch.seq_id[i][0] = 0;
         batch.logits[i] = (i == n_tokens - 1) ? 1 : 0;
     }
 
@@ -298,17 +328,10 @@ mnemon_err_t mnemon_embed_batch(mnemon_embed_t *e, const char **texts,
         }
     }
 
-    /* Phase 2: build multi-sequence batch */
+    /* Phase 2: build multi-sequence batch -- write into the seq_id arrays
+     * that llama_batch_init allocated rather than replacing the pointers. */
     struct llama_batch batch = llama_batch_init(total_tokens, 0, (int32_t)count);
     batch.n_tokens = total_tokens;
-
-    /* Allocate seq_id storage for all tokens */
-    llama_seq_id *seq_ids = malloc((size_t)total_tokens * sizeof(llama_seq_id));
-    if (!seq_ids) {
-        llama_batch_free(batch);
-        free(all_tokens); free(token_counts); free(token_offsets);
-        return MNEMON_ERR_OOM;
-    }
 
     for (size_t i = 0; i < count; i++) {
         int offset = token_offsets[i];
@@ -318,8 +341,7 @@ mnemon_err_t mnemon_embed_batch(mnemon_embed_t *e, const char **texts,
             batch.token[idx] = all_tokens[idx];
             batch.pos[idx] = j; /* position within this sequence */
             batch.n_seq_id[idx] = 1;
-            seq_ids[idx] = (llama_seq_id)i;
-            batch.seq_id[idx] = &seq_ids[idx];
+            batch.seq_id[idx][0] = (llama_seq_id)i;
             batch.logits[idx] = (j == n - 1) ? 1 : 0; /* logits on last token */
         }
     }
@@ -328,7 +350,7 @@ mnemon_err_t mnemon_embed_batch(mnemon_embed_t *e, const char **texts,
     int rc = llama_decode(e->ctx, batch);
     if (rc != 0) {
         llama_batch_free(batch);
-        free(seq_ids); free(all_tokens); free(token_counts); free(token_offsets);
+        free(all_tokens); free(token_counts); free(token_offsets);
         /* Fall back to sequential on decode failure */
         for (size_t i = 0; i < count; i++) {
             mnemon_err_t err = mnemon_embed_text(e, texts[i], text_lens[i],
@@ -353,7 +375,6 @@ mnemon_err_t mnemon_embed_batch(mnemon_embed_t *e, const char **texts,
     }
 
     llama_batch_free(batch);
-    free(seq_ids);
     free(all_tokens);
     free(token_counts);
     free(token_offsets);

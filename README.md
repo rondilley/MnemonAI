@@ -125,13 +125,12 @@ make install
 
 This installs the `mnemond` binary to `~/.local/bin/`. CMake prints a feature summary at the end showing what was detected.
 
-### Step 4: Add ~/.local/bin to PATH and Set Library Path
+### Step 4: Add ~/.local/bin to PATH
 
-Add these to your `~/.bashrc` (or `~/.zshrc`):
+Add this to your `~/.bashrc` (or `~/.zshrc`):
 
 ```bash
 export PATH="$HOME/.local/bin:$PATH"
-export LD_LIBRARY_PATH="$HOME/.local/lib:$LD_LIBRARY_PATH"
 ```
 
 Then reload:
@@ -143,7 +142,7 @@ source ~/.bashrc
 ### Step 5: Verify the Install
 
 ```bash
-mnemond --version             # should print: mnemond v0.3.0 (...)
+mnemond --version             # should print: mnemond v0.4.0 (...)
 mnemond --check-config        # should print: Configuration is valid.
 ```
 
@@ -177,7 +176,7 @@ mnemond --warmup
 This loads the model, compiles GPU kernels, runs one test embedding, and exits. You'll see output like:
 
 ```
-2026-04-05T05:18:56Z [INFO] mnemond 0.3.0 starting
+2026-04-05T05:18:56Z [INFO] mnemond 0.4.0 starting
 2026-04-05T05:18:56Z [INFO] CPU: AMD RYZEN AI MAX+ 395 w/ Radeon 8060S (32 cores) SIMD: avx512
 2026-04-05T05:18:56Z [INFO] loading embedding model: ~/.local/share/mnemond/models/nomic-embed-text-v1.5.Q8_0.gguf
 2026-04-05T05:18:56Z [INFO] embedding model loaded: 768 dimensions
@@ -194,8 +193,77 @@ This loads the model, compiles GPU kernels, runs one test embedding, and exits. 
 ```bash
 cd MnemonAI/build
 ctest --output-on-failure                                                  # 196 C unit tests
-LD_LIBRARY_PATH=$HOME/.local/lib python3 ../test/test_mcp_client.py        # 105 MCP tests
+python3 ../test/test_mcp_client.py                                         # 105 MCP tests
 ```
+
+---
+
+## Troubleshooting: AMD GPU Hangs (gfx1151 / Strix Halo)
+
+AMD Strix Halo APUs (Ryzen AI MAX+ 395, Radeon 8060S, gfx1151) may hang indefinitely during GPU embedding under certain kernel and firmware configurations. The hang occurs when ROCm issues `hipMemset` or `hipMemcpy` to the GPU, which triggers a MES (Micro-Engine Scheduler) firmware deadlock. Symptoms:
+
+- `mnemond --warmup` hangs at "warmup: running test embedding..."
+- 100% CPU usage on one core, no GPU activity
+- Must be killed with `kill -9` or `SIGTERM` x3
+
+This affects any ROCm HIP workload on gfx1151 (not specific to mnemond or llama.cpp).
+
+### Root Cause
+
+A CWSR (Compute Wave Save/Restore) bug in the kernel's amdgpu driver (kernels < 6.18-rc6) causes a MES firmware deadlock on gfx1151 when dispatching GPU compute kernels. The `amdgpu-dkms-firmware` package (shipped with `amdgpu-install`) can also supply broken MES firmware blobs (versions 0x80/0x83) that exacerbate the issue.
+
+Tracked in: ROCm issues [#5590](https://github.com/ROCm/ROCm/issues/5590), [#5724](https://github.com/ROCm/ROCm/issues/5724), [#5991](https://github.com/ROCm/ROCm/issues/5991), [#6027](https://github.com/ROCm/ROCm/issues/6027) and llama.cpp issues [#15889](https://github.com/ggml-org/llama.cpp/issues/15889), [#19482](https://github.com/ggml-org/llama.cpp/issues/19482).
+
+### Fix
+
+Two changes are needed. Apply both, then reboot:
+
+**1. Disable CWSR** (required for kernels < 6.18):
+
+```bash
+# Add kernel boot parameter
+sudo sed -i 's/^GRUB_CMDLINE_LINUX_DEFAULT="\(.*\)"/GRUB_CMDLINE_LINUX_DEFAULT="\1 amdgpu.cwsr_enable=0"/' /etc/default/grub
+sudo update-grub
+```
+
+Or for systemd-boot:
+
+```bash
+sudo kernelstub -a "amdgpu.cwsr_enable=0"
+```
+
+**2. Remove amdgpu-dkms-firmware** (if installed via `amdgpu-install`):
+
+```bash
+sudo apt autoremove --purge amdgpu-dkms-firmware
+```
+
+This package can override the kernel's built-in firmware with broken MES blobs. The kernel's native firmware (shipped with `linux-firmware`) is correct for gfx1151.
+
+**3. Reboot and verify:**
+
+```bash
+sudo reboot
+# After reboot:
+cat /proc/cmdline | grep cwsr    # should show: amdgpu.cwsr_enable=0
+mnemond --warmup                 # should complete in seconds, not hang
+```
+
+### Permanent Fix
+
+Upgrade to kernel 6.18+ which includes the CWSR fix for gfx1151. Once on 6.18+, the `amdgpu.cwsr_enable=0` parameter can be removed.
+
+### Fallback: CPU-Only Mode
+
+If GPU issues persist, force CPU-only embedding by setting `gpu_layers = 0` in the config:
+
+```ini
+# ~/.config/mnemond/mnemond.conf
+[embedding]
+gpu_layers = 0
+```
+
+This bypasses ROCm initialization entirely. CPU inference is slower but starts instantly with no JIT step.
 
 ---
 
@@ -380,16 +448,13 @@ For AI tools running on the same machine as mnemond. The tool launches mnemond a
   "mcpServers": {
     "mnemond": {
       "command": "mnemond",
-      "args": ["--stdio"],
-      "env": {
-        "LD_LIBRARY_PATH": "/home/YOU/.local/lib"
-      }
+      "args": ["--stdio"]
     }
   }
 }
 ```
 
-Save to `~/.claude/settings.json` or project `.claude/settings.json`. Replace `/home/YOU` with your actual home directory (environment variables like `$HOME` don't expand in JSON).
+Save to `~/.claude/settings.json` or project `.claude/settings.json`.
 
 #### Claude Desktop
 
@@ -400,16 +465,13 @@ Settings > Developer > MCP Servers > Add:
   "mcpServers": {
     "mnemond": {
       "command": "/home/YOU/.local/bin/mnemond",
-      "args": ["--stdio"],
-      "env": {
-        "LD_LIBRARY_PATH": "/home/YOU/.local/lib"
-      }
+      "args": ["--stdio"]
     }
   }
 }
 ```
 
-Desktop apps don't inherit shell PATH or LD_LIBRARY_PATH, so use full paths.
+Desktop apps don't inherit shell PATH, so use the full path to the binary. Replace `/home/YOU` with your actual home directory.
 
 #### Cursor
 
@@ -420,10 +482,7 @@ Settings > MCP > Add Server:
   "mcpServers": {
     "mnemond": {
       "command": "mnemond",
-      "args": ["--stdio"],
-      "env": {
-        "LD_LIBRARY_PATH": "/home/YOU/.local/lib"
-      }
+      "args": ["--stdio"]
     }
   }
 }
@@ -438,10 +497,7 @@ In `~/.gemini/settings.json`:
   "mcpServers": {
     "mnemond": {
       "command": "mnemond",
-      "args": ["--stdio"],
-      "env": {
-        "LD_LIBRARY_PATH": "/home/YOU/.local/lib"
-      }
+      "args": ["--stdio"]
     }
   }
 }
@@ -456,16 +512,11 @@ In `~/.codex/config.json`:
   "mcpServers": {
     "mnemond": {
       "command": "mnemond",
-      "args": ["--stdio"],
-      "env": {
-        "LD_LIBRARY_PATH": "/home/YOU/.local/lib"
-      }
+      "args": ["--stdio"]
     }
   }
 }
 ```
-
-**Tip:** If you install llama.cpp system-wide (`sudo make install` in llama.cpp), you don't need the `env` / `LD_LIBRARY_PATH` entries.
 
 ### Network Mode (HTTP)
 
@@ -562,7 +613,7 @@ Same pattern -- point `command` at `mnemond-remote`:
 From any configured client, ask your AI tool to run `health_check`. It should return:
 
 ```json
-{"status": "ok", "version": "v0.3.0 (...)", "storage_ok": true}
+{"status": "ok", "version": "v0.4.0 (...)", "storage_ok": true}
 ```
 
 Or test directly:

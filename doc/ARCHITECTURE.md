@@ -1435,7 +1435,7 @@ All MCP tool parameters are validated against JSON Schema before the handler is 
 
 ```cmake
 cmake_minimum_required(VERSION 3.16)
-project(mnemond VERSION 0.1.0 LANGUAGES C CXX)  # CXX for vendored usearch only
+project(mnemond VERSION 0.4.0 LANGUAGES C CXX)  # CXX for vendored usearch only
 
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
