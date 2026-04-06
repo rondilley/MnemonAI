@@ -84,7 +84,7 @@ Everything installs under your home directory. No root required. No system files
         fts/                            # SQLite FTS5 keyword index
         vectors/                        # usearch HNSW vector index
         models/                         # embedding model (~150MB, auto-downloaded)
-~/.config/mnemond/
+~/.local/etc/mnemond/
     mnemond.conf                        # configuration (optional -- all settings have defaults)
 ```
 
@@ -860,7 +860,8 @@ rrf_k = 60                           # RRF fusion constant
 enabled = true                        # enable HTTP transport
 bind = 127.0.0.1                      # bind address
 port = 3847                           # listen port
-auth_token = YOUR-SECRET-TOKEN        # required for non-localhost binding
+auth_token =                          # optional Bearer token
+allow_ips =                           # optional CIDR allow list (e.g., 192.168.1.0/24)
 tls_cert = /path/to/cert.pem          # TLS certificate (optional)
 tls_key = /path/to/key.pem            # TLS private key (optional)
 
@@ -878,10 +879,10 @@ max_memory_size_kb = 64               # per-memory content size limit
 |-------|-------|--------|
 | 1. Foundation | Core storage, stdio MCP, hybrid search, import, secret detection | **Complete** (22 tools) |
 | 2. Temporal + Lifecycle | Bi-temporal queries, Hebbian decay, consolidation, writer queue | **Complete** (26 tools) |
-| 3. Hardware + Daemon | GPU/NPU/SIMD detection, daemon polish, SIGHUP/SIGUSR1 | **Complete** (28 tools) |
+| 3. Hardware + Daemon | GPU/NPU/SIMD detection, daemon polish, SIGHUP/SIGUSR1 | **Complete** |
 | 4. Extraction | External LLM entity extraction via libcurl | **Complete** (requires `-DENABLE_CURL=ON`) |
 | 5. Advanced | Admission control, audit log, auto-model download | **Complete** |
-| 6. HTTP Transport | Streamable HTTP (MCP 2025-03-26), multi-session, Bearer auth | **Complete** (libmicrohttpd) |
+| 6. HTTP Transport | Streamable HTTP (MCP 2025-03-26), multi-session, auth, IP filtering | **Complete** (libmicrohttpd) |
 | 7. Abuse Detection | Prompt injection scanner, brute-force detection, enumeration detection, audit logging | **Complete** |
 | 8. GPU/SIMD Acceleration | ROCm HIP GPU embedding, batch embedding, SIMD distance functions wired into live code | **Complete** |
 | 9. Integration | Parallel search, TLS config, SSE streaming, recursive imports, background jobs, injection scanner wiring, auth brute-force wiring, entity merging, reader pool | **Complete** |

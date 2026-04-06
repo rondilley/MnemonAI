@@ -768,7 +768,7 @@ Both use the same dimensions (768), metric (cosine), and ID mapping scheme. The 
 
 Tools are registered in `mcp_dispatch.c` with their JSON Schema input definitions. The `tools/list` MCP method returns the full registry.
 
-### 6.3 Tool Definitions (28 tools)
+### 6.3 Tool Definitions (32 tools)
 
 #### 6.3.1 Memory CRUD (4 tools)
 
@@ -1110,7 +1110,7 @@ graph TD
 ```
 
 **CLI arguments:**
-- `--config <path>` -- Config file (default: ~/.config/mnemond/mnemond.conf)
+- `--config <path>` -- Config file (default: SYSCONFDIR/mnemond.conf, typically ~/.local/etc/mnemond/mnemond.conf)
 - `--stdio` -- Run in foreground, MCP over stdin/stdout
 - `--daemon` -- Daemonize (fork, setsid)
 - `--foreground` -- Run in foreground without stdio (for systemd Type=notify)
@@ -1201,17 +1201,17 @@ WantedBy=multi-user.target
 
 For direct use with Claude Code / Cursor:
 ```bash
-mnemond --stdio --config ~/.config/mnemond/mnemond.conf
+mnemond --stdio
 ```
 
-No daemonization. MCP read loop on main thread. stderr for logging. This is the Phase 1 primary mode and the expected MCP client configuration:
+No daemonization. MCP read loop on main thread. stderr for logging. Config is auto-discovered via the search path. This is the primary mode and the expected MCP client configuration:
 
 ```json
 {
   "mcpServers": {
     "mnemond": {
       "command": "mnemond",
-      "args": ["--stdio", "--config", "/home/user/.config/mnemond/mnemond.conf"]
+      "args": ["--stdio"]
     }
   }
 }
@@ -1351,7 +1351,7 @@ MnemonAI's threat surface is narrow by design:
 | Surface | Exposure | Mitigation |
 |---------|----------|------------|
 | stdin (MCP) | Local process only | Input validation, size limits |
-| HTTP (Phase 3) | Bound to 127.0.0.1 by default | Config-controlled bind address. Static Bearer token required. Refuses to start if bind != 127.0.0.1 and no auth_token is configured. |
+| HTTP (Phase 3) | Bound to 127.0.0.1 by default | Config-controlled bind address. Optional Bearer token auth. Optional CIDR IP allow list (`allow_ips`). Warns if binding to non-localhost with neither auth nor IP filtering. |
 | Filesystem | Data directory | UNIX permissions, optional fscrypt |
 | GPU (NVML) | Local device | dlopen'd, read-only queries |
 | Extraction endpoint | localhost HTTP | Config-controlled, timeout, no auth tokens stored |
@@ -1672,11 +1672,12 @@ auth_token =                        # Required if bind != 127.0.0.1; static Bear
 ### 12.3 Config Search Path
 
 1. Path specified by `--config` flag (highest priority)
-2. `$XDG_CONFIG_HOME/mnemon_ai/mnemon_ai.conf`
+2. `$XDG_CONFIG_HOME/mnemond/mnemond.conf`
 3. `~/.config/mnemond/mnemond.conf`
-4. `/etc/mnemon_ai/mnemon_ai.conf`
+4. `SYSCONFDIR/mnemond.conf` (compiled-in, typically `~/.local/etc/mnemond/mnemond.conf`)
+5. `/etc/mnemond/mnemond.conf`
 
-First found wins. Missing config file is not an error -- all settings have defaults.
+First found wins. Missing config file is not an error -- all settings have defaults. When creating a new config (e.g., `--gen-key`), the default location is `SYSCONFDIR/mnemond.conf`.
 
 ---
 
@@ -1927,7 +1928,7 @@ No other memory MCP server has any hardware awareness. mnemon_ai is the only one
 | **Language** | Rust | Python | Python | Python | **C** |
 | **Key Innovation** | Hebbian associative memory | Zettelkasten notes | Engram lifecycle | Memory as OS resource | **All combined** |
 | **Hardware Aware** | No | No | No | No | **Yes** |
-| **MCP Support** | Yes (37 tools) | No | No | No | **Yes (28 tools)** |
+| **MCP Support** | Yes (37 tools) | No | No | No | **Yes (32 tools)** |
 | **Bulk Import** | No | No | No | No | **Yes** |
 | **Production Ready** | Early | Research | Research | Research | **Phase 1 target** |
 
@@ -2029,7 +2030,7 @@ Phase 1 is fully implemented. This section documents deviations from the archite
 | test_mcp_client.py | 105 | All 32 tools end-to-end over stdio, MCP spec conformance, schema validation |
 | test_mcp_http.py | 42 | All 32 tools over HTTP, auth, sessions, CORS |
 | test_mcp_perf.py | -- | Latency/throughput at 100/1000 memory scale |
-| **Total** | **325** | |
+| **Total** | **343** | |
 
 ### 18.4 Performance Benchmarks (AMD Ryzen AI MAX+ 395, 32 cores)
 

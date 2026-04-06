@@ -321,7 +321,7 @@ For now, Claude Code and Claude Desktop with HTTP are the most frictionless path
 
 ## 6. Making Claude Actually Use Memory
 
-Wiring up the MCP server gives Claude *access* to memory tools. It does not give Claude *behavior* around when and how to use them. The model discovers the 28 functional tools via the MCP handshake, but without explicit guidance, it won't proactively store or retrieve memories.
+Wiring up the MCP server gives Claude *access* to memory tools. It does not give Claude *behavior* around when and how to use them. The model discovers the 32 tools via the MCP handshake, but without explicit guidance, it won't proactively store or retrieve memories.
 
 ### The CLAUDE.md Memory Protocol
 
