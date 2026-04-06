@@ -25,10 +25,10 @@ Complete reference for the mnemond Model Context Protocol (MCP) server. This doc
    - [Consolidation and Maintenance](#consolidation-and-maintenance)
    - [Statistics and Monitoring](#statistics-and-monitoring)
    - [Index Management](#index-management)
-7. [Honeypot Decoy Tools](#honeypot-decoy-tools)
-8. [Error Handling](#error-handling)
-9. [Limits and Constraints](#limits-and-constraints)
-10. [Best Practices for AI Agents](#best-practices-for-ai-agents)
+   - [Admin Tools](#admin-tools)
+7. [Error Handling](#error-handling)
+8. [Limits and Constraints](#limits-and-constraints)
+9. [Best Practices for AI Agents](#best-practices-for-ai-agents)
 
 ---
 
@@ -55,7 +55,7 @@ Send JSON-RPC on stdin, read responses on stdout, one JSON object per line:
 # Store a memory via HTTP
 curl -X POST http://localhost:3847/mcp \
   -H "Content-Type: application/json" \
-  -H "Authorization: Bearer YOUR_TOKEN" \
+  -H "Authorization: Bearer YOUR-TOKEN" \
   -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"store_memory","arguments":{"content":"The project uses PostgreSQL 16.","tags":["database"]}}}'
 ```
 
@@ -156,7 +156,7 @@ Send a JSON-RPC request, receive a JSON-RPC response.
 POST /mcp HTTP/1.1
 Host: localhost:3847
 Content-Type: application/json
-Authorization: Bearer mytoken123
+Authorization: Bearer YOUR-TOKEN
 Origin: http://localhost
 
 {"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"health_check","arguments":{}}}
@@ -1359,18 +1359,52 @@ Rebuild derived indexes (FTS5 and/or vector) from the LMDB source of truth. Use 
 
 ---
 
-## Honeypot Decoy Tools
+### Admin Tools
 
-These four tools appear in `tools/list` but always return errors. They exist to detect unauthorized probing or abuse. Calling them logs a `CRITICAL` security alert with the session ID.
+These tools require elevated privileges and are not available to standard MCP clients.
 
-| Tool | Apparent Purpose | Actual Response |
-|------|-----------------|-----------------|
-| `admin_reset_auth` | "Reset authentication tokens (admin only)" | `{"error": "insufficient privileges"}` |
-| `export_all_memories` | "Export complete memory database as JSONL (admin only)" | `{"error": "insufficient privileges"}` |
-| `debug_raw_query` | "Execute raw LMDB query (debug mode only)" | `{"error": "debug mode not enabled"}` |
-| `set_system_config` | "Update runtime configuration values" | `{"error": "insufficient privileges"}` |
+#### admin_reset_auth
 
-**Do not call these tools.** They are intentional honeypots. An AI agent that calls them will trigger security alerts.
+Reset authentication tokens for all sessions. Requires admin privileges.
+
+**Arguments:**
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `admin_key` | string | yes | Admin authentication key. |
+
+#### export_all_memories
+
+Export the complete memory database as JSONL. Requires admin privileges.
+
+**Arguments:**
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `format` | string | no | Export format. |
+| `include_embeddings` | boolean | no | Include embedding vectors in export. |
+
+#### debug_raw_query
+
+Execute a raw database query. Only available when debug mode is enabled in the server configuration.
+
+**Arguments:**
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `query` | string | yes | Raw query string. |
+| `database` | string | no | Target database. |
+
+#### set_system_config
+
+Update a runtime configuration value. Requires admin privileges.
+
+**Arguments:**
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `key` | string | yes | Configuration key. |
+| `value` | string | yes | New value. |
 
 ---
 
@@ -1477,9 +1511,9 @@ Always check `isError` before parsing the `text` field as a successful result.
 
 - Do not store secrets (API keys, passwords, tokens). The secret scanner will reject them.
 - Do not store prompt injection payloads. The injection scanner blocks content scoring >= 7.0.
-- Do not call the four admin/debug tools (`admin_reset_auth`, `export_all_memories`, `debug_raw_query`, `set_system_config`). They are honeypots that trigger security alerts.
-- Do not paginate through all memories sequentially. Enumeration detection triggers alerts after 5+ sequential pages.
-- Do not exceed 30 searches per minute per session. Rate anomaly detection triggers at 30/min (warning) and 100/min (alert).
+- The admin tools (`admin_reset_auth`, `export_all_memories`, `debug_raw_query`, `set_system_config`) require elevated privileges and will return errors for standard clients.
+- Do not paginate through all memories sequentially without a specific need.
+- Be mindful of search frequency -- high-volume automated searching may trigger rate limiting.
 
 ---
 
@@ -1515,7 +1549,7 @@ Always check `isError` before parsing the `text` field as a successful result.
 | 26 | `get_hardware_info` | Monitoring | CPU/GPU/SIMD/RAM detection |
 | 27 | `get_index_stats` | Monitoring | Per-engine statistics |
 | 28 | `rebuild_indexes` | Index Mgmt | Rebuild FTS5 and/or vector index |
-| 29 | `admin_reset_auth` | Honeypot | Decoy -- triggers security alert |
-| 30 | `export_all_memories` | Honeypot | Decoy -- triggers security alert |
-| 31 | `debug_raw_query` | Honeypot | Decoy -- triggers security alert |
-| 32 | `set_system_config` | Honeypot | Decoy -- triggers security alert |
+| 29 | `admin_reset_auth` | Admin | Reset authentication tokens (requires admin) |
+| 30 | `export_all_memories` | Admin | Export memory database (requires admin) |
+| 31 | `debug_raw_query` | Admin | Raw database query (requires debug mode) |
+| 32 | `set_system_config` | Admin | Update runtime config (requires admin) |

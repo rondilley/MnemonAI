@@ -660,6 +660,7 @@ int main(int argc, char *argv[])
             .port            = cfg->http_port,
             .max_connections = cfg->http_max_connections,
             .auth_token      = cfg->http_auth_token,
+            .allow_ips       = cfg->http_allow_ips,
             .tls_cert_path   = cfg->tls_cert,
             .tls_key_path    = cfg->tls_key,
             .mcp_path        = "/mcp",

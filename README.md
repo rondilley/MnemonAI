@@ -17,8 +17,8 @@ Every piece of data stays on your local filesystem. No API keys required for cor
 - **Network MCP Server** -- Streamable HTTP transport (MCP 2025-03-26 spec) with TLS, Bearer auth, session management, SSE streaming, and Origin validation. Run one instance on a server, connect from any machine.
 - **Memory Lifecycle** -- multi-tier memory (episodic/semantic/procedural), Hebbian importance decay, episodic-to-semantic consolidation with automatic entity deduplication and merge
 - **Bulk Import** -- ingest email (mbox), CSV, JSONL, Markdown, and plain text with rich source metadata, configurable chunking, recursive directory traversal, and background job tracking
-- **32 MCP Tools** -- 28 functional tools (memory CRUD, entity/graph, four search modes, temporal queries, bulk import, maintenance, hardware introspection) + 4 honeypot decoy tools
-- **Security** -- FSM-based secret detection, prompt injection scanner (integrated into store path, score >= 7.0 blocks storage), content size limits, auth brute-force detection (per-IP rate limiting wired into HTTP layer), canary records, decoy admin tools, enumeration detection, credential query detection, OWASP MCP Top 10 mitigations
+- **32 MCP Tools** -- Memory CRUD, entity/graph, four search modes, temporal queries, bulk import, maintenance, hardware introspection, and admin tools
+- **Security** -- FSM-based secret detection, prompt injection scanner (integrated into store path), content size limits, auth brute-force detection (per-IP rate limiting), IP allow list, enumeration detection, credential query detection, audit logging, OWASP MCP Top 10 mitigations
 - **Crash-Safe** -- LMDB (ACID, mmap, zero-copy), write-ahead intent log, rebuildable derived indexes (FTS5 + usearch)
 
 ## Architecture
@@ -56,7 +56,7 @@ graph TB
 
 ## Status
 
-**All phases complete. No known gaps.** Dual transport (stdio + Streamable HTTP with SSE), 32 MCP tools (28 functional + 4 honeypot), parallel hybrid search with RRF fusion, network server with TLS/auth/sessions, hardware detection (AMD/NVIDIA GPU, AMD NPU, SIMD), auto-model download, entity extraction, prompt injection detection integrated into store path, auth brute-force detection, admission control, audit logging, persistent reader pool, recursive imports with background job tracking, and entity merging in consolidation.
+**All phases complete. No known gaps.** Dual transport (stdio + Streamable HTTP with SSE), 32 MCP tools, parallel hybrid search with RRF fusion, network server with TLS/auth/sessions/IP filtering, hardware detection (AMD/NVIDIA GPU, AMD NPU, SIMD), auto-model download, entity extraction, prompt injection detection, auth brute-force detection, admission control, audit logging, persistent reader pool, recursive imports with background job tracking, and entity merging in consolidation.
 
 - 12,500+ lines of C source across 30 modules
 - 343 tests (196 C unit + 105 Python stdio + 42 Python HTTP)
@@ -394,13 +394,20 @@ model_path =
 enabled = true
 bind = 0.0.0.0
 port = 3847
-auth_token = YOUR-SECRET-TOKEN-HERE
+
+# Access control (use one or both):
+# auth_token = YOUR-SECRET-TOKEN-HERE
+allow_ips = 192.168.1.0/24, 10.0.0.0/8
 EOF
 ```
 
-Generate a token: `openssl rand -hex 32`
+**Access control options:**
 
-The `auth_token` is **required** when binding to non-localhost. mnemond refuses to start without one.
+- **`allow_ips`** -- Comma-separated CIDR allow list. Only IPs matching an entry can connect. Supports single IPs (`10.0.0.5`), subnets (`192.168.1.0/24`), and broad ranges (`10.0.0.0/8`). Connections from all other IPs are rejected with a 403. Leave empty or omit to allow all IPs.
+
+- **`auth_token`** -- Static Bearer token. Clients must send `Authorization: Bearer <token>` on every request. Generate one with: `openssl rand -hex 32`
+
+Both can be used together (IP filter runs first, then auth). For a trusted local network, `allow_ips` alone is sufficient. For exposure to untrusted networks, use `auth_token` (with TLS).
 
 2. **Start the server** (or restart the systemd service if already enabled):
 
@@ -432,6 +439,113 @@ sudo ufw allow 3847/tcp
 # Fedora (firewalld)
 sudo firewall-cmd --add-port=3847/tcp --permanent && sudo firewall-cmd --reload
 ```
+
+#### Enabling TLS (HTTPS)
+
+For encrypted connections, mnemond supports TLS via libmicrohttpd. You can use certificates from a real CA (Let's Encrypt, etc.) or generate self-signed certificates for internal/development use.
+
+**Option A: Self-signed certificate (quick, internal use)**
+
+Generate a certificate authority (CA) and server certificate. The CA cert can be distributed to clients so they trust the server without `--insecure` flags.
+
+```bash
+TLSDIR=~/.local/etc/mnemond/tls
+mkdir -p "$TLSDIR"
+
+# 1. Create a local CA (one-time setup)
+openssl genrsa -out "$TLSDIR/ca.key" 4096
+openssl req -x509 -new -nodes -key "$TLSDIR/ca.key" -sha256 -days 3650 \
+  -subj "/CN=mnemond Local CA" -out "$TLSDIR/ca.crt"
+
+# 2. Create a server key and certificate signing request (CSR)
+#    Replace "your-server.example.com" with your server's hostname or IP.
+openssl genrsa -out "$TLSDIR/server.key" 2048
+openssl req -new -key "$TLSDIR/server.key" \
+  -subj "/CN=your-server.example.com" -out "$TLSDIR/server.csr"
+
+# 3. Sign the server cert with the CA
+#    Add Subject Alternative Names for all hostnames/IPs clients will use.
+cat > "$TLSDIR/server.ext" << EOF
+authorityKeyIdentifier=keyid,issuer
+basicConstraints=CA:FALSE
+subjectAltName = @alt_names
+
+[alt_names]
+DNS.1 = your-server.example.com
+DNS.2 = tars.local
+DNS.3 = localhost
+IP.1 = 127.0.0.1
+EOF
+
+openssl x509 -req -in "$TLSDIR/server.csr" \
+  -CA "$TLSDIR/ca.crt" -CAkey "$TLSDIR/ca.key" \
+  -CAcreateserial -out "$TLSDIR/server.crt" \
+  -days 825 -sha256 -extfile "$TLSDIR/server.ext"
+
+# 4. Restrict permissions
+chmod 600 "$TLSDIR/server.key" "$TLSDIR/ca.key"
+chmod 644 "$TLSDIR/server.crt" "$TLSDIR/ca.crt"
+
+# Clean up intermediates
+rm "$TLSDIR/server.csr" "$TLSDIR/server.ext" "$TLSDIR/ca.srl"
+```
+
+This produces:
+- `ca.crt` -- CA certificate. Install on clients that need to trust this server.
+- `ca.key` -- CA private key. Keep safe; only needed to sign new server certs.
+- `server.crt` -- Server certificate. Referenced in mnemond config.
+- `server.key` -- Server private key. Referenced in mnemond config.
+
+**Option B: Let's Encrypt (public-facing servers)**
+
+Use [certbot](https://certbot.eff.org/) or [acme.sh](https://github.com/acmesh-official/acme.sh) to obtain certificates, then point the config at the resulting files (typically `/etc/letsencrypt/live/DOMAIN/fullchain.pem` and `privkey.pem`).
+
+**Add TLS to the config:**
+
+Add the `tls_cert` and `tls_key` lines to the `[http]` section:
+
+```ini
+[http]
+enabled = true
+bind = 0.0.0.0
+port = 3847
+auth_token = YOUR-SECRET-TOKEN-HERE
+tls_cert = ~/.local/etc/mnemond/tls/server.crt
+tls_key = ~/.local/etc/mnemond/tls/server.key
+```
+
+Restart the daemon:
+
+```bash
+systemctl --user restart mnemond
+```
+
+The log should now show `tls=yes`:
+
+```
+[INFO] HTTP transport started: 0.0.0.0:3847/mcp (auth=yes, tls=yes)
+```
+
+**Verify TLS is working:**
+
+```bash
+# With self-signed CA:
+curl --cacert ~/.local/etc/mnemond/tls/ca.crt \
+  -X POST https://localhost:3847/mcp \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer YOUR-SECRET-TOKEN-HERE" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"health_check","arguments":{}}}'
+
+# Or skip verification for quick testing (not recommended for production):
+curl -k -X POST https://localhost:3847/mcp \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer YOUR-SECRET-TOKEN-HERE" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"health_check","arguments":{}}}'
+```
+
+**Installing the CA cert on client machines:**
+
+Copy `ca.crt` to each client machine and install it in the system trust store. See [Installing the CA Certificate on Client Machines](#installing-the-ca-certificate-on-client-machines) in the Client Configuration section below for detailed instructions for Ubuntu, Fedora, Arch, macOS, and Windows.
 
 ---
 
@@ -525,8 +639,83 @@ For AI tools running on a different machine from the mnemond server. The tool co
 MCP clients that support HTTP/SSE transport can connect directly using the server URL:
 
 ```
-http://framework-desktop:3847/mcp
+https://your-server:3847/mcp
 ```
+
+For MCP clients that only support stdio transport, use a local wrapper script that bridges stdio to HTTP (see below).
+
+#### Installing the CA Certificate on Client Machines
+
+If the mnemond server uses a self-signed TLS certificate (see [Enabling TLS](#enabling-tls-https)), each client machine must trust the CA that signed it. Copy the `ca.crt` file from the server to the client, then install it:
+
+**Ubuntu / Debian:**
+
+```bash
+sudo cp ca.crt /usr/local/share/ca-certificates/mnemond-ca.crt
+sudo update-ca-certificates
+```
+
+This updates the system trust store. `curl`, `python3`, `wget`, Node.js, and most MCP clients will trust the mnemond server immediately.
+
+**Fedora / RHEL / CentOS / Rocky:**
+
+```bash
+sudo cp ca.crt /etc/pki/ca-trust/source/anchors/mnemond-ca.crt
+sudo update-ca-trust
+```
+
+**Arch Linux:**
+
+```bash
+sudo cp ca.crt /etc/ca-certificates/trust-source/anchors/mnemond-ca.crt
+sudo update-ca-trust
+```
+
+**macOS:**
+
+```bash
+sudo security add-trusted-cert -d -r trustRoot \
+  -k /Library/Keychains/System.keychain ca.crt
+```
+
+Or open Keychain Access, drag `ca.crt` into "System", double-click it, expand "Trust", and set "When using this certificate" to "Always Trust".
+
+**Windows:**
+
+Option 1 -- GUI:
+
+1. Double-click `ca.crt` to open the Certificate Import Wizard.
+2. Select **Local Machine** (requires admin) or **Current User**.
+3. Choose **Place all certificates in the following store** > **Browse** > **Trusted Root Certification Authorities**.
+4. Click **Finish**.
+
+Option 2 -- PowerShell (as Administrator):
+
+```powershell
+Import-Certificate -FilePath .\ca.crt -CertStoreLocation Cert:\LocalMachine\Root
+```
+
+Option 3 -- Command Prompt (as Administrator):
+
+```cmd
+certutil -addstore "Root" ca.crt
+```
+
+**Verifying trust is working:**
+
+After installing the CA cert, verify from the client machine:
+
+```bash
+# Should succeed without --cacert or -k flags:
+curl -X POST https://your-server:3847/mcp \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer YOUR-TOKEN" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"health_check","arguments":{}}}'
+```
+
+If you see `SSL certificate problem: unable to get local issuer certificate`, the CA cert was not installed correctly. Re-check the steps above for your OS.
+
+#### Stdio-to-HTTP Wrapper Scripts
 
 For MCP clients that only support stdio transport, use a local wrapper script that bridges stdio to HTTP:
 
@@ -536,7 +725,7 @@ For MCP clients that only support stdio transport, use a local wrapper script th
 #!/bin/bash
 # Bridges stdio to mnemond HTTP server
 # Reads JSON-RPC from stdin, POSTs to server, writes response to stdout
-SERVER="http://framework-desktop:3847/mcp"
+SERVER="https://your-server:3847/mcp"
 TOKEN="YOUR-SECRET-TOKEN-HERE"
 while IFS= read -r line; do
     curl -s -X POST "$SERVER" \
@@ -556,7 +745,7 @@ chmod +x ~/bin/mnemond-remote
 ```bat
 @echo off
 REM Requires curl (included in Windows 10+)
-set SERVER=http://framework-desktop:3847/mcp
+set SERVER=https://your-server:3847/mcp
 set TOKEN=YOUR-SECRET-TOKEN-HERE
 :loop
 set /p LINE=
@@ -564,6 +753,8 @@ curl -s -X POST %SERVER% -H "Content-Type: application/json" -H "Authorization: 
 echo.
 goto loop
 ```
+
+Note: The wrapper scripts use `https://`. If the system CA trust store has the mnemond CA cert installed (see above), no extra flags are needed. If you cannot install the CA cert system-wide, add `--cacert /path/to/ca.crt` to the `curl` command in the script.
 
 Then configure any MCP client to use the wrapper:
 
@@ -691,7 +882,7 @@ max_memory_size_kb = 64               # per-memory content size limit
 | 4. Extraction | External LLM entity extraction via libcurl | **Complete** (requires `-DENABLE_CURL=ON`) |
 | 5. Advanced | Admission control, audit log, auto-model download | **Complete** |
 | 6. HTTP Transport | Streamable HTTP (MCP 2025-03-26), multi-session, Bearer auth | **Complete** (libmicrohttpd) |
-| 7. Honeypot | Prompt injection scanner, canary records, decoy tools, brute-force detection, enumeration detection | **Complete** |
+| 7. Abuse Detection | Prompt injection scanner, brute-force detection, enumeration detection, audit logging | **Complete** |
 | 8. GPU/SIMD Acceleration | ROCm HIP GPU embedding, batch embedding, SIMD distance functions wired into live code | **Complete** |
 | 9. Integration | Parallel search, TLS config, SSE streaming, recursive imports, background jobs, injection scanner wiring, auth brute-force wiring, entity merging, reader pool | **Complete** |
 

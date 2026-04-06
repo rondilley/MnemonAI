@@ -32,6 +32,7 @@ typedef struct {
     int         port;            /* default 3847 */
     int         max_connections; /* default 32 */
     const char *auth_token;      /* Bearer token (NULL = no auth) */
+    const char *allow_ips;       /* comma-separated CIDR allow list (NULL = allow all) */
     const char *tls_cert_path;   /* PEM cert file (NULL = no TLS) */
     const char *tls_key_path;    /* PEM key file */
     const char *mcp_path;        /* endpoint path, default "/mcp" */

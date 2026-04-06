@@ -152,6 +152,10 @@ static void set_value(mnemon_config_t *cfg, const char *section,
             free(cfg->http_auth_token);
             cfg->http_auth_token = strdup(value);
         }
+        else if (strcmp(key, "allow_ips") == 0) {
+            free(cfg->http_allow_ips);
+            cfg->http_allow_ips = strdup(value);
+        }
         else if (strcmp(key, "tls_cert") == 0) STR_SET(tls_cert);
         else if (strcmp(key, "tls_key") == 0) STR_SET(tls_key);
     }
@@ -280,6 +284,7 @@ void mnemon_config_free(mnemon_config_t *cfg)
     FREE_FIELD(allowed_paths);
     FREE_FIELD(http_bind);
     FREE_FIELD(http_auth_token);
+    FREE_FIELD(http_allow_ips);
     FREE_FIELD(tls_cert);
     FREE_FIELD(tls_key);
     #undef FREE_FIELD

@@ -59,6 +59,7 @@ typedef struct mnemon_config {
     int      http_port;
     int      http_max_connections;
     char    *http_auth_token;
+    char    *http_allow_ips;     /* comma-separated CIDR list, NULL = allow all */
     char    *tls_cert;
     char    *tls_key;
 } mnemon_config_t;

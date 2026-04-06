@@ -60,6 +60,12 @@ typedef struct {
     sse_queue_t *sse_queue;  /* Non-NULL when client has an active SSE stream */
 } http_session_t;
 
+/* Parsed CIDR entry for IP allow list */
+typedef struct {
+    uint32_t network;   /* network address in host byte order */
+    uint32_t mask;      /* netmask in host byte order */
+} cidr_entry_t;
+
 struct mnemon_http {
     struct MHD_Daemon  *daemon;
     mnemon_dispatch_t  *dispatch;
@@ -71,6 +77,8 @@ struct mnemon_http {
     char               *tls_cert_mem;   /* PEM cert kept alive for MHD */
     char               *tls_key_mem;    /* PEM key kept alive for MHD */
     mnemon_honeypot_t  *honeypot;      /* Abuse detection (may be NULL) */
+    cidr_entry_t       *allow_list;    /* parsed CIDR entries (NULL = allow all) */
+    int                 allow_count;
 };
 
 /* Per-request upload accumulator */
@@ -149,6 +157,86 @@ static const char *get_client_ip(struct MHD_Connection *conn)
     return "unknown";
 }
 
+/* ---- IP allow list (CIDR matching) ---- */
+
+/* Parse "192.168.1.0/24,10.0.0.0/8,172.16.5.10" into cidr_entry_t array.
+ * A bare IP without /prefix is treated as /32. */
+static int parse_allow_ips(const char *spec, cidr_entry_t **out)
+{
+    if (!spec || !spec[0]) { *out = NULL; return 0; }
+
+    /* Count commas to estimate array size */
+    int capacity = 1;
+    for (const char *p = spec; *p; p++)
+        if (*p == ',') capacity++;
+
+    cidr_entry_t *list = calloc((size_t)capacity, sizeof(cidr_entry_t));
+    if (!list) return 0;
+
+    char *tmp = strdup(spec);
+    if (!tmp) { free(list); return 0; }
+
+    int count = 0;
+    char *saveptr = NULL;
+    for (char *tok = strtok_r(tmp, ",", &saveptr);
+         tok && count < capacity;
+         tok = strtok_r(NULL, ",", &saveptr))
+    {
+        /* Strip whitespace */
+        while (*tok == ' ') tok++;
+        char *end = tok + strlen(tok) - 1;
+        while (end > tok && *end == ' ') *end-- = '\0';
+
+        int prefix = 32;
+        char *slash = strchr(tok, '/');
+        if (slash) {
+            *slash = '\0';
+            prefix = atoi(slash + 1);
+            if (prefix < 0 || prefix > 32) prefix = 32;
+        }
+
+        struct in_addr addr;
+        if (inet_pton(AF_INET, tok, &addr) == 1) {
+            uint32_t mask = prefix == 0 ? 0 : ~((uint32_t)0) << (32 - prefix);
+            list[count].network = ntohl(addr.s_addr) & mask;
+            list[count].mask = mask;
+            count++;
+        } else {
+            mnemon_log(MNEMON_LOG_WARNING,
+                       "HTTP: ignoring invalid allow_ips entry: %s", tok);
+        }
+    }
+
+    free(tmp);
+    *out = list;
+    return count;
+}
+
+/* Check if a client IP is in the allow list.
+ * Returns true if allowed (no list configured, or IP matches an entry). */
+static bool check_ip_allowed(mnemon_http_t *h, struct MHD_Connection *conn)
+{
+    if (!h->allow_list || h->allow_count == 0)
+        return true;  /* no allow list = allow all */
+
+    const union MHD_ConnectionInfo *ci =
+        MHD_get_connection_info(conn, MHD_CONNECTION_INFO_CLIENT_ADDRESS);
+    if (!ci || !ci->client_addr)
+        return false;
+
+    const struct sockaddr *sa = ci->client_addr;
+    if (sa->sa_family != AF_INET)
+        return false;  /* IPv6 not in allow list = deny */
+
+    uint32_t client_ip = ntohl(((const struct sockaddr_in *)sa)->sin_addr.s_addr);
+
+    for (int i = 0; i < h->allow_count; i++) {
+        if ((client_ip & h->allow_list[i].mask) == h->allow_list[i].network)
+            return true;
+    }
+    return false;
+}
+
 static bool check_auth(mnemon_http_t *h, struct MHD_Connection *conn)
 {
     if (!h->auth_token)
@@ -170,21 +258,26 @@ static bool check_auth(mnemon_http_t *h, struct MHD_Connection *conn)
     return ok;
 }
 
-static bool check_origin(struct MHD_Connection *conn)
+static bool check_origin(mnemon_http_t *h, struct MHD_Connection *conn)
 {
     const char *origin = MHD_lookup_connection_value(conn, MHD_HEADER_KIND,
                                                       "Origin");
     /* No Origin header is fine (curl, non-browser clients) */
     if (!origin) return true;
 
-    /* Block suspicious origins that aren't localhost */
+    /* Localhost origins are always allowed */
     if (strstr(origin, "localhost") || strstr(origin, "127.0.0.1") ||
         strstr(origin, "[::1]"))
         return true;
 
-    /* For non-localhost origins, block to prevent DNS rebinding */
-    mnemon_log(MNEMON_LOG_WARNING, "HTTP: blocked request from origin: %s",
-               origin);
+    /* If auth or IP allow list is configured, allow any origin since
+     * access control is already enforced. Without either, restrict to
+     * localhost to prevent DNS rebinding attacks. */
+    if (h->auth_token || h->allow_count > 0)
+        return true;
+
+    mnemon_log(MNEMON_LOG_WARNING, "HTTP: blocked request from origin: %s "
+               "(set auth_token or allow_ips to allow remote origins)", origin);
     return false;
 }
 
@@ -240,7 +333,8 @@ static enum MHD_Result handle_post(mnemon_http_t *h,
             return respond_error(conn, MHD_HTTP_SERVICE_UNAVAILABLE,
                                  "max sessions reached");
         }
-        mnemon_log(MNEMON_LOG_INFO, "HTTP: new session %s", session->id);
+        mnemon_log(MNEMON_LOG_INFO, "HTTP: new session %s from %s",
+                   session->id, get_client_ip(conn));
     } else if (session_id) {
         session = find_session(h, session_id);
         if (!session) {
@@ -312,8 +406,8 @@ static enum MHD_Result handle_delete(mnemon_http_t *h,
     pthread_mutex_lock(&h->session_mutex);
     http_session_t *session = find_session(h, session_id);
     if (session) {
-        mnemon_log(MNEMON_LOG_INFO, "HTTP: session terminated: %s",
-                   session_id);
+        mnemon_log(MNEMON_LOG_INFO, "HTTP: session terminated: %s from %s",
+                   session_id, get_client_ip(conn));
         remove_session(h, session_id);
     }
     pthread_mutex_unlock(&h->session_mutex);
@@ -453,13 +547,26 @@ static enum MHD_Result request_handler(void *cls,
     if (strcmp(url, h->mcp_path) != 0)
         return respond_error(conn, MHD_HTTP_NOT_FOUND, "not found");
 
+    /* IP allow list check (before auth, so denied IPs never reach auth) */
+    if (!check_ip_allowed(h, conn)) {
+        const char *ip = get_client_ip(conn);
+        mnemon_log(MNEMON_LOG_WARNING,
+                   "HTTP: denied connection from %s (not in allow_ips)",
+                   ip ? ip : "unknown");
+        return respond_error(conn, MHD_HTTP_FORBIDDEN, "ip not allowed");
+    }
+
     /* Origin validation */
-    if (!check_origin(conn))
+    if (!check_origin(h, conn))
         return respond_error(conn, MHD_HTTP_FORBIDDEN, "origin blocked");
 
     /* Auth check */
-    if (!check_auth(h, conn))
+    if (!check_auth(h, conn)) {
+        const char *ip = get_client_ip(conn);
+        mnemon_log(MNEMON_LOG_WARNING,
+                   "HTTP: auth failed from %s", ip ? ip : "unknown");
         return respond_error(conn, MHD_HTTP_UNAUTHORIZED, "unauthorized");
+    }
 
     /* GET: SSE stream for server-initiated messages */
     if (strcmp(method, "GET") == 0)
@@ -543,16 +650,17 @@ mnemon_err_t mnemon_http_start(mnemon_http_t **out,
     if (!out || !cfg || !dispatch)
         return MNEMON_ERR_INVALID_INPUT;
 
-    /* Security: refuse non-localhost binding without auth token */
+    /* Security advisory: warn if binding to non-localhost without auth or IP filtering */
     if (cfg->bind_address &&
         strcmp(cfg->bind_address, "127.0.0.1") != 0 &&
         strcmp(cfg->bind_address, "localhost") != 0 &&
         strcmp(cfg->bind_address, "::1") != 0 &&
-        (!cfg->auth_token || cfg->auth_token[0] == '\0')) {
-        mnemon_err_set(MNEMON_ERR_INVALID_INPUT, 0,
-                       "HTTP: refusing to bind to %s without auth_token -- "
-                       "set [http] auth_token in config", cfg->bind_address);
-        return MNEMON_ERR_INVALID_INPUT;
+        (!cfg->auth_token || cfg->auth_token[0] == '\0') &&
+        (!cfg->allow_ips || cfg->allow_ips[0] == '\0')) {
+        mnemon_log(MNEMON_LOG_WARNING,
+                   "HTTP: binding to %s with no auth_token and no allow_ips -- "
+                   "server is open to all clients on the network",
+                   cfg->bind_address);
     }
 
     mnemon_http_t *h = calloc(1, sizeof(*h));
@@ -562,12 +670,31 @@ mnemon_err_t mnemon_http_start(mnemon_http_t **out,
     h->auth_token = cfg->auth_token && cfg->auth_token[0]
                     ? strdup(cfg->auth_token) : NULL;
     h->mcp_path = strdup(cfg->mcp_path ? cfg->mcp_path : "/mcp");
+    h->allow_count = parse_allow_ips(cfg->allow_ips, &h->allow_list);
     pthread_mutex_init(&h->session_mutex, NULL);
 
     int port = cfg->port > 0 ? cfg->port : 3847;
 
     unsigned int flags = MHD_USE_INTERNAL_POLLING_THREAD |
                          MHD_USE_AUTO | MHD_ALLOW_SUSPEND_RESUME;
+
+    /* Resolve bind address to sockaddr for MHD_OPTION_SOCK_ADDR */
+    struct sockaddr_in bind_addr;
+    memset(&bind_addr, 0, sizeof(bind_addr));
+    bind_addr.sin_family = AF_INET;
+    bind_addr.sin_port = htons((uint16_t)port);
+    const char *bind_str = cfg->bind_address ? cfg->bind_address : "127.0.0.1";
+    if (strcmp(bind_str, "localhost") == 0)
+        bind_addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    else if (inet_pton(AF_INET, bind_str, &bind_addr.sin_addr) != 1) {
+        mnemon_err_set(MNEMON_ERR_INVALID_INPUT, 0,
+                       "HTTP: invalid bind address: %s", bind_str);
+        free(h->auth_token);
+        free(h->mcp_path);
+        pthread_mutex_destroy(&h->session_mutex);
+        free(h);
+        return MNEMON_ERR_INVALID_INPUT;
+    }
 
     /* Start the daemon */
     if (cfg->tls_cert_path && cfg->tls_key_path) {
@@ -619,6 +746,7 @@ mnemon_err_t mnemon_http_start(mnemon_http_t **out,
             request_handler, h,
             MHD_OPTION_NOTIFY_COMPLETED, request_completed, NULL,
             MHD_OPTION_CONNECTION_LIMIT, (unsigned int)cfg->max_connections,
+            MHD_OPTION_SOCK_ADDR, (struct sockaddr *)&bind_addr,
             MHD_OPTION_HTTPS_MEM_KEY, h->tls_key_mem,
             MHD_OPTION_HTTPS_MEM_CERT, h->tls_cert_mem,
             MHD_OPTION_END);
@@ -628,6 +756,7 @@ mnemon_err_t mnemon_http_start(mnemon_http_t **out,
             request_handler, h,
             MHD_OPTION_NOTIFY_COMPLETED, request_completed, NULL,
             MHD_OPTION_CONNECTION_LIMIT, (unsigned int)cfg->max_connections,
+            MHD_OPTION_SOCK_ADDR, (struct sockaddr *)&bind_addr,
             MHD_OPTION_END);
     }
 
@@ -644,11 +773,12 @@ mnemon_err_t mnemon_http_start(mnemon_http_t **out,
     }
 
     mnemon_log(MNEMON_LOG_INFO,
-               "HTTP transport started: %s:%d%s (auth=%s, tls=%s)",
+               "HTTP transport started: %s:%d%s (auth=%s, tls=%s, allow_ips=%s)",
                cfg->bind_address ? cfg->bind_address : "0.0.0.0",
                port, h->mcp_path,
                h->auth_token ? "yes" : "no",
-               (cfg->tls_cert_path && cfg->tls_key_path) ? "yes" : "no");
+               (cfg->tls_cert_path && cfg->tls_key_path) ? "yes" : "no",
+               h->allow_count > 0 ? cfg->allow_ips : "all");
 
     *out = h;
     return MNEMON_OK;
@@ -681,6 +811,7 @@ void mnemon_http_stop(mnemon_http_t *h)
 
     free(h->auth_token);
     free(h->mcp_path);
+    free(h->allow_list);
     free(h->tls_cert_mem);
     free(h->tls_key_mem);
     pthread_mutex_destroy(&h->session_mutex);

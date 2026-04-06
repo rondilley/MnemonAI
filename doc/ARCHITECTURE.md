@@ -1718,7 +1718,7 @@ Streamable HTTP transport (MCP 2025-03-26 spec) via libmicrohttpd. Single `/mcp`
 
 ### Phase 7: Honeypot / Abuse Detection -- **Complete**
 
-Prompt injection scanner (18 patterns + unicode bidi), canary record tracking, auth brute-force detection, search rate anomaly, enumeration detection, credential query detection, 4 decoy admin tools, structured audit alerts with severity levels.
+Prompt injection scanner (18 patterns + unicode bidi), canary record tracking, auth brute-force detection, search rate anomaly, enumeration detection, credential query detection, admin tool access control, structured audit alerts with severity levels.
 
 ### Phase 8: GPU/SIMD Acceleration -- **Complete**
 
@@ -2022,12 +2022,12 @@ Phase 1 is fully implemented. This section documents deviations from the archite
 | test_fts | 11 | Index, search, remove, update memory, update entity, sanitization, checkpoint, clear, empty/special query |
 | test_vector | 7 | Add/remove/search, entity isolation, save/load persistence, empty search, rwlock |
 | test_search | 6 | Keyword, hybrid RRF, no results, top_k cap, empty query, UUID validity |
-| test_mcp | 42 | All 32 tools + 4 decoy honeypot tools + MCP lifecycle + tools/list schema + 3 error codes + isError + secret rejection + content size cap |
+| test_mcp | 42 | All 32 tools + MCP lifecycle + tools/list schema + 3 error codes + isError + secret rejection + content size cap |
 | test_temporal | 24 | ISO 8601, decay math, UUID ops, importance update, prune, **admit control**, **audit log**, **model manager** |
 | test_secret | 33 | All 7 pattern types, false positives, edge cases, entropy |
 | test_storage | 24 | Full-field round-trip, 10KB content, unicode, tags, bulk 50, delete+FTS, **delete entity**, **edges_to**, **rebuild indexes**, **replay intents**, **storage accessors** |
-| test_mcp_client.py | 105 | All 32 tools end-to-end over stdio, MCP spec conformance, schema validation, decoy tools |
-| test_mcp_http.py | 42 | All 32 tools over HTTP, auth, sessions, CORS, decoy tools |
+| test_mcp_client.py | 105 | All 32 tools end-to-end over stdio, MCP spec conformance, schema validation |
+| test_mcp_http.py | 42 | All 32 tools over HTTP, auth, sessions, CORS |
 | test_mcp_perf.py | -- | Latency/throughput at 100/1000 memory scale |
 | **Total** | **325** | |
 

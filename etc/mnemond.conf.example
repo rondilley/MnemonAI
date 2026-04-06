@@ -64,4 +64,6 @@ enabled = false
 bind = 127.0.0.1
 port = 3847
 max_connections = 32
-auth_token =                        # Required if bind != 127.0.0.1; static Bearer token
+auth_token =                        # Optional Bearer token for HTTP auth
+allow_ips =                         # Comma-separated CIDR allow list (empty = allow all)
+                                    # Example: 192.168.1.0/24, 10.0.0.5, 172.16.0.0/12
