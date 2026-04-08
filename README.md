@@ -1,6 +1,6 @@
 # MnemonAI
 
-A high-performance, local-only memory MCP server written in C11.
+A local-only memory MCP server written in C11.
 
 ## What It Does
 
@@ -55,18 +55,11 @@ graph TB
 
 **Logging:** Foreground mode logs status to stdout and errors to stderr. Daemon mode logs to syslog. Stdio MCP mode logs to stderr only (stdout is the JSON-RPC channel).
 
-## Status
+## Numbers
 
-**All phases complete. No known gaps.** Dual transport (stdio + Streamable HTTP with SSE), 35 MCP tools, parallel hybrid search with RRF fusion, network server with TLS/auth/sessions/IP filtering, hardware detection (AMD/NVIDIA GPU, AMD NPU, SIMD), auto-model download, entity extraction, prompt injection detection, auth brute-force detection, admission control, audit logging, persistent reader pool, recursive imports with background job tracking, and entity merging in consolidation.
-
-- 12,500+ lines of C source across 30 modules
-- 343 tests (196 C unit + 105 Python stdio + 42 Python HTTP)
-- 35 MCP tools, all tested at API, stdio, and HTTP levels
-- GPU-accelerated embedding via ROCm HIP (AMD) or CUDA (NVIDIA)
-- AVX-512/AVX2 SIMD for vector distance computation and L2 normalization
-- Persistent reader thread pool for parallel search dispatch
-- Performance: 417 ops/sec store, 10us retrieve, 530us search at 1K memories
-- Zero segfaults, zero warnings (`-Werror=implicit-function-declaration`)
+- 35 MCP tools, 12,500+ lines of C, 343 tests
+- Store: 417 ops/sec, Retrieve: 10us, Search: 530us (at 1K memories)
+- LongMemEval benchmark: 100% R@5 oracle, 27.6% R@5 at 19K corpus ([details](doc/BENCHMARK-REPORT.md))
 
 See [doc/ARCHITECTURE.md](doc/ARCHITECTURE.md) for the full architecture document.
 
@@ -874,20 +867,6 @@ detect_secrets = true                 # reject content containing API keys, toke
 max_memory_size_kb = 64               # per-memory content size limit
 ```
 
-## Implementation Phases
-
-| Phase | Scope | Status |
-|-------|-------|--------|
-| 1. Foundation | Core storage, stdio MCP, hybrid search, import, secret detection | **Complete** (22 tools) |
-| 2. Temporal + Lifecycle | Bi-temporal queries, Hebbian decay, consolidation, writer queue | **Complete** (26 tools) |
-| 3. Hardware + Daemon | GPU/NPU/SIMD detection, daemon polish, SIGHUP/SIGUSR1 | **Complete** |
-| 4. Extraction | External LLM entity extraction via libcurl | **Complete** (requires `-DENABLE_CURL=ON`) |
-| 5. Advanced | Admission control, audit log, auto-model download | **Complete** |
-| 6. HTTP Transport | Streamable HTTP (MCP 2025-03-26), multi-session, auth, IP filtering | **Complete** (libmicrohttpd) |
-| 7. Abuse Detection | Prompt injection scanner, brute-force detection, enumeration detection, audit logging | **Complete** |
-| 8. GPU/SIMD Acceleration | ROCm HIP GPU embedding, batch embedding, SIMD distance functions wired into live code | **Complete** |
-| 9. Integration | Parallel search, TLS config, SSE streaming, recursive imports, background jobs, injection scanner wiring, auth brute-force wiring, entity merging, reader pool | **Complete** |
-
 ## Dependencies
 
 **Build (required):**
@@ -915,6 +894,7 @@ max_memory_size_kb = 64               # per-memory content size limit
 
 - [MCP Reference](doc/MCP-REFERENCE.md) -- complete protocol, tools, and API reference (for developers and AI agents)
 - [Architecture](doc/ARCHITECTURE.md) -- full system design (v0.4, peer-reviewed)
+- [Benchmark Report](doc/BENCHMARK-REPORT.md) -- LongMemEval retrieval quality and performance analysis
 - [Research Synthesis](doc/research-synthesis.md) -- landscape analysis and academic survey
 - [Landscape Report](doc/memory-mcp-report-v2.md) -- practitioner guide to existing memory MCP servers
 - [Token Efficiency Guide](doc/claude-automation-efficiency-2026.pdf) -- Claude automation and token optimization strategies

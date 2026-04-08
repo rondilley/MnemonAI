@@ -1,9 +1,9 @@
 # MnemonAI: Architecture Document
 
-**Version:** 0.4 -- All gaps closed
+**Version:** 0.4 -- v0.4
 **Author:** Architecture session (Claude Code)
 **Date:** 2026-04-04
-**Status:** Reviewed by Gemini 2.5 Pro, OpenAI o3, Grok 3, Mistral Large. Findings addressed. Phase 9 integration complete.
+**Status: Complete
 **Prerequisites:** [Research Synthesis](research-synthesis.md), [Landscape Report](memory-mcp-report-v2.md)
 
 ---
@@ -22,11 +22,8 @@
 10. [Security Model](#10-security-model)
 11. [Build System and Dependencies](#11-build-system-and-dependencies)
 12. [Configuration](#12-configuration)
-13. [Implementation Phases](#13-implementation-phases)
 14. [Risk Register](#14-risk-register)
 15. [Resolved Design Questions](#15-resolved-design-questions)
-16. [Peer Review Response](#16-peer-review-response)
-17. [Competitive Comparison](#17-competitive-comparison)
 
 ---
 
@@ -40,7 +37,7 @@ MnemonAI is a UNIX daemon written in C that provides persistent, searchable memo
 graph TB
     subgraph Clients
         CC[Claude Code / Cursor<br/>Any MCP Client]
-        MC[Multi-client access<br/>Phase 3]
+        MC[Multi-client access<br/>]
     end
 
     subgraph "mnemond"
@@ -94,7 +91,7 @@ graph TB
 
 3. **Zero mandatory runtime dependencies.** The daemon starts and serves memories on a machine with no GPU, no CUDA, no network. Hardware acceleration is opportunistic -- detected at startup, used if available, gracefully absent if not.
 
-4. **Layered complexity.** Phase 1 is a working memory server over stdio. Each subsequent phase adds one axis of capability. Never two at once. Each phase produces a usable system.
+4. **Layered complexity.** The system can run with or without any optional subsystem (embeddings, entity extraction, GPU acceleration, HTTP transport). Each layer adds capability without breaking the layers below it.
 
 5. **Data locality.** All data stays on the local filesystem. No DNS resolution, no TLS handshakes, no cloud tokens anywhere in the code. The only outbound network call is to localhost for optional entity extraction.
 
@@ -106,13 +103,13 @@ graph TB
 
 ### 3.1 MCP Protocol Layer
 
-**Decision:** Build the stdio JSON-RPC 2.0 transport from scratch on cJSON. Add libmicrohttpd for streamable HTTP in Phase 3.
+**Decision:** Build the stdio JSON-RPC 2.0 transport from scratch on cJSON. libmicrohttpd provides streamable HTTP.
 
 **Rationale:**
 - The stdio transport is ~500-700 lines of C. The protocol is: read newline-delimited JSON from stdin, write JSON to stdout. No session management, no connection lifecycle, no TLS.
 - SupaMCP is early-stage with an unstable API. Adopting it creates coupling to an external abstraction over a trivial protocol.
 - cJSON (MIT, 2 files) is the most widely deployed C JSON library. No alternative warrants evaluation.
-- For HTTP (Phase 3): libmicrohttpd is GNU LGPL, battle-tested (GNUnet, systemd), callback-driven. It is a library, not a framework.
+- For HTTP: libmicrohttpd is GNU LGPL, battle-tested (GNUnet, systemd), callback-driven. It is a library, not a framework.
 
 **Transport abstraction:**
 ```c
@@ -175,7 +172,7 @@ model = ""
 **Alternatives rejected:**
 - External HTTP embedding server: adds latency to every store and search
 - ONNX Runtime: larger dependency, less community support for GGUF quantized models
-- Multiple model support: unnecessary complexity for Phase 1; nomic-embed-text-v1.5 is the clear winner
+- Multiple model support: nomic-embed-text-v1.5 is the only model currently supported
 
 ### 3.4 Cross-Storage Transaction Coordination
 
@@ -296,7 +293,7 @@ graph TB
 
     subgraph "MCP Transport Layer"
         STDIO[mcp_stdio.c<br/>stdin/stdout]
-        HTTP[mcp_http.c<br/>libmicrohttpd<br/>Phase 3]
+        HTTP[mcp_http.c<br/>libmicrohttpd<br/>]
         DISPATCH[mcp_dispatch.c<br/>tool registry<br/>JSON-RPC 2.0]
         TOOLS[mcp_tools.c<br/>tool handlers]
     end
@@ -370,7 +367,7 @@ graph TB
 | **daemon** | daemon.c/h | fork/setsid, PID file, signal handlers, sd_notify | log, libsystemd (optional) |
 | **log** | log.c/h | Structured logging to syslog and/or stderr | none (standalone) |
 | **mcp_stdio** | mcp_stdio.c/h | Read JSON-RPC from stdin, write to stdout | cJSON |
-| **mcp_http** | mcp_http.c/h | Streamable HTTP transport (Phase 3) | libmicrohttpd, cJSON |
+| **mcp_http** | mcp_http.c/h | Streamable HTTP transport () | libmicrohttpd, cJSON |
 | **mcp_dispatch** | mcp_dispatch.c/h | Tool registry, JSON-RPC 2.0 dispatch, error codes, input validation | cJSON, mcp_tools |
 | **mcp_tools** | mcp_tools.c/h | Tool handler implementations | storage, search, temporal, memory, consolidate, extract, secret, hardware |
 | **storage** | storage.c/h | Cross-engine write coordinator, intent log | graph, fts, vector, embed, id |
@@ -1361,7 +1358,7 @@ MnemonAI's threat surface is narrow by design:
 | Surface | Exposure | Mitigation |
 |---------|----------|------------|
 | stdin (MCP) | Local process only | Input validation, size limits |
-| HTTP (Phase 3) | Bound to 127.0.0.1 by default | Config-controlled bind address. Optional Bearer token auth. Optional CIDR IP allow list (`allow_ips`). Warns if binding to non-localhost with neither auth nor IP filtering. |
+| HTTP () | Bound to 127.0.0.1 by default | Config-controlled bind address. Optional Bearer token auth. Optional CIDR IP allow list (`allow_ips`). Warns if binding to non-localhost with neither auth nor IP filtering. |
 | Filesystem | Data directory | UNIX permissions, optional fscrypt |
 | GPU (NVML) | Local device | dlopen'd, read-only queries |
 | Extraction endpoint | localhost HTTP | Config-controlled, timeout, no auth tokens stored |
@@ -1543,9 +1540,9 @@ install(FILES etc/mnemond.service DESTINATION lib/systemd/system)
 | usearch | 2.x | Vendored (C API + C++ headers) | Yes | Apache 2.0 | Vector index (HNSW) |
 | SQLite3 | 3.45.1 | Vendored (amalgamation) | Yes | Public domain | Full-text search (FTS5) |
 | llama.cpp | Latest | System install | Yes | MIT | Embedding generation |
-| libcurl | 7.x/8.x | System package | No | MIT-like | Entity extraction HTTP (Phase 4) |
+| libcurl | 7.x/8.x | System package | No | MIT-like | Entity extraction HTTP  |
 | libsystemd | 2xx | System package | No | LGPL-2.1 | sd_notify |
-| libnuma | 2.x | System package | No | LGPL-2.1 | NUMA-aware allocation (Phase 5) |
+| libnuma | 2.x | System package | No | LGPL-2.1 | NUMA-aware allocation  |
 | pthreads | POSIX | System (glibc) | Yes | LGPL | Threading |
 
 ### 11.3 Source Tree
@@ -1568,7 +1565,7 @@ mnemon_ai/
         log.c / log.h                -- Structured logging
         id.c / id.h                  -- UUIDv7
         mcp_stdio.c / mcp_stdio.h   -- stdio transport
-        mcp_http.c / mcp_http.h     -- HTTP transport (Phase 3)
+        mcp_http.c / mcp_http.h     -- HTTP transport ()
         mcp_dispatch.c / mcp_dispatch.h  -- Tool registry, dispatch
         mcp_tools.c / mcp_tools.h   -- Tool implementations
         storage.c / storage.h       -- Cross-engine coordinator
@@ -1691,61 +1688,10 @@ First found wins. Missing config file is not an error -- all settings have defau
 
 ---
 
-## 13. Implementation Phases
-
-### Phase 1: Foundation -- **Complete**
-
-Core storage, stdio MCP, hybrid search, bulk import, secret detection.
-
-**Delivered:** 22 MCP tools, LMDB+FTS5+usearch storage pipeline, hand-rolled MessagePack, RRF hybrid search, JSONL/CSV/mbox/text import with chunking, FSM secret detection, UUIDv7, intent log, index rebuild.
-
-### Phase 2: Temporal + Lifecycle -- **Complete**
-
-Bi-temporal queries, memory lifecycle, consolidation, MPSC writer queue.
-
-**Delivered:** get_history, get_state_at_time, get_changes_since, prune_stale, consolidate_memories tools. Paginated list_memories. Hebbian importance decay. Writer thread with backpressure.
-
-### Phase 3: Hardware + HTTP -- **Complete
-
-Hardware detection (AMD/NVIDIA/Intel GPU, AMD XDNA NPU, SIMD, NUMA), daemon polish.
-
-**Delivered:** get_hardware_info, get_index_stats tools. AMD GPU detection via sysfs (VRAM, GTT, ROCm). NPU detection. SIGHUP config reload. SIGUSR1 stats dump. AVX2+AVX-512 SIMD distance functions.
-
-### Phase 4: Entity Extraction -- **Complete** (requires libcurl + external LLM)
-
-Automatic entity/relation extraction via external OpenAI-compatible endpoint.
-
-**Delivered:** extract.c with full libcurl HTTP client, structured extraction prompt, JSON response parsing, entity/relation creation. Enabled with `ENABLE_CURL=ON` and `[extraction] enabled = true` in config.
-
-### Phase 5: Advanced -- **Complete**
-
-Admission control, audit logging, model management.
-
-**Delivered:** Boilerplate content filtering (admit.c). Append-only JSON audit log (audit.c). Auto-model detection, recommendation, and download (model_mgr.c).
-
-### Phase 6: HTTP Transport -- **Complete**
-
-Streamable HTTP transport (MCP 2025-03-26 spec) via libmicrohttpd. Single `/mcp` endpoint (POST/GET/DELETE/OPTIONS), `Mcp-Session-Id` sessions, Bearer auth, Origin validation, CORS. Up to 256 concurrent sessions.
-
-### Phase 7: Honeypot / Abuse Detection -- **Complete**
-
-Prompt injection scanner (18 patterns + unicode bidi), canary record tracking, auth brute-force detection, search rate anomaly, enumeration detection, credential query detection, admin tool access control, structured audit alerts with severity levels.
-
-### Phase 8: GPU/SIMD Acceleration -- **Complete**
-
-llama.cpp rebuilt with ROCm HIP for AMD GPU embedding acceleration. True batch embedding via multi-sequence `llama_decode()`. SIMD distance functions (`g_simd_ops`) wired into L2 normalization (`embed.c`) and consolidation clustering (`consolidate.c`). 15 new tests for SIMD correctness, GPU detection, and consolidation.
-
-### Phase 9: Integration and Gap Closure -- **Complete**
-
-Parallel search dispatch (reader pool + ad-hoc pthreads), TLS cert/key config in `[http]` section, SSE streaming GET endpoint with per-session event queues, recursive directory imports with depth limit, background import job tracking (async + `get_import_status`), injection scanner wired into `store_memory`, auth brute-force wired into HTTP `check_auth`, entity merging during consolidation, persistent reader pool (`[threads] reader_pool_size`).
-
-### Phase 10: Signal Handling and Operational Hardening -- **Complete**
-
-Robust signal handling: `SA_RESTART` not set so SIGTERM/SIGINT interrupt blocking I/O immediately. Shutdown watchdog thread forces `_exit()` after 10s if graceful teardown stalls. Escalating SIGTERM (1st=graceful, 3rd=immediate `_exit`). `--warmup` CLI flag triggers GPU JIT compilation without starting the daemon. llama.cpp verbose output suppressed via `llama_log_set()` callback (INFO/DEBUG -> our DEBUG level, hidden at default `log_level=info`).
-
-### Remaining Work
+## 13. Remaining Work
 
 - Conflict detection (new facts contradict existing edges)
+- Retrieval ranking quality at scale (27.6% R@5 at 19K corpus -- see [BENCHMARK-REPORT.md](BENCHMARK-REPORT.md))
 - Man pages
 
 ---
@@ -1780,252 +1726,9 @@ These were open during the initial draft. All resolved as of 2026-04-03.
 
 ---
 
----
+## 16. Benchmarks and Test Results
 
-## 16. Peer Review Response
-
-Architecture reviewed 2026-04-03 by four independent models: **Gemini 2.5 Pro**, **OpenAI o3**, **Grok 3**, **Mistral Large**. All received the same critique prompt. Raw reviews archived at `/tmp/review_*.txt`.
-
-### Changes Made (v0.1 to v0.2)
-
-| Finding | Source | Resolution |
-|---------|--------|------------|
-| Memory ownership undefined -- no `_free()` functions | All 4 | Added ownership convention and `_free()` functions for all output structs (Section 4.3) |
-| No unified error handling -- bare `int` returns | All 4 | Added `mnemon_err_t` enum with thread-local error context (Section 4.3) |
-| usearch thread safety unguarded | All 4 | Added `pthread_rwlock_t` for usearch access (Section 7.3, 7.4) |
-| Intent log recovery not granular -- crash during replay loses progress | All 4 | Added `steps_done` bitmask to intent record, per-step tracking (Section 3.4) |
-| Intent log missing delete path | Gemini, GPT | Added explicit delete sequence through all 5 steps (Section 3.4) |
-| usearch key collision silently overwrites | All 4 | Added collision check on insert, rehash on collision (Section 5.8) |
-| usearch `save()` not atomic | GPT, Mistral | Added `save(tmp) + fsync + rename` pattern (Section 5.8) |
-| No HTTP authentication | All 4 | Added static Bearer token, refuse non-loopback bind without auth (Section 10.1, 12.2) |
-| SQLite FTS5 thread safety -- shared connection | GPT, Mistral | Per-thread `sqlite3*` connections, WAL autocheckpoint (Section 7.3) |
-| `MemoryDenyWriteExecute=no` too permissive | Gemini, GPT | Changed default to `yes` (Section 8.4) |
-| Secret detection bypass via encoding, false positives | Gemini, Grok, Mistral | Added entropy-based detection, `skip_secret_check` param, read-path redaction (Section 10.3) |
-| Entity extraction failure stores partial memory | Gemini | Made atomic: extraction failure = entire store fails (Section 3.2) |
-| Write queue blocks indefinitely | Gemini | Non-blocking: returns `MNEMON_ERR_QUEUE_FULL` immediately (Section 7.5) |
-| FTS5 query injection via special operators | Gemini | Added FTS5 query sanitization (Section 10.4) |
-| Long-lived LMDB read txns pin freelist | GPT | Changed to per-request read transactions + `mdb_env_reader_check` on startup (Section 7.3) |
-| Consolidation batch blocks all writes | GPT | Batch size limit (default 50), snapshot isolation (Section 3.5) |
-| `float embedding[768]` on stack blows 8KB/thread | GPT | Changed to heap-allocated `float *embedding` (Section 5.3, 5.5) |
-| SQLite WAL not flushed before intent complete | GPT | Added explicit `SQLITE_CHECKPOINT_TRUNCATE` in write sequence (Section 3.4) |
-| No model file integrity check | GPT | Added optional `model_sha256` config field (Section 3.3, 12.2) |
-| RRF fusion naive -- no score normalization | Grok | Added per-ranker min-max normalization, exclude empty rankers (Section 6.3.2) |
-| Extraction response not sanitized | Grok | Added schema validation and control character rejection (Section 3.2) |
-| Expired edges bloat database | Mistral | Added to risk register, `prune_stale` handles edges (Section 14) |
-| LMDB map size no runtime monitoring | Mistral | Added `mdb_env_info()` monitoring with 80% warning threshold (Section 14) |
-| MessagePack no schema versioning | GPT | Added version byte, ignore-unknown-keys policy (Section 5.6) |
-| No `--no-gpu` flag for hardened environments | GPT | Added CLI flag (Section 8.1) |
-| `pthread_barrier_t` not portable (musl) | GPT | Replaced with `pthread_mutex_t` + `pthread_cond_t` (Section 7.4) |
-
-### Critiques Rejected
-
-| Finding | Source | Reason for Rejection |
-|---------|--------|---------------------|
-| Replace FTS5 with custom inverted index in LMDB | Mistral | Reinventing BM25 is more work and more error-prone than SQLite's production-grade FTS5. |
-| Remove HTTP transport entirely | Mistral | Contradicts the design goal of daemon-mode multi-client access. |
-| Simplify bi-temporal to just created_at/updated_at | Mistral | Bi-temporal reasoning is a core differentiator. Central to the research findings. |
-| Remove consolidation thread | Mistral | Memory lifecycle management is architecturally central, not premature optimization. |
-| Embed a small NER model for entity extraction | Grok | Adding a second model contradicts "zero mandatory dependencies" and UNIX philosophy. |
-| Use LMDB multi-writer mode with partitioning | Mistral | LMDB has no multi-writer mode. `MDB_NOLOCK` removes safety guarantees. |
-| Replace usearch with custom HNSW implementation | Mistral | Writing a correct HNSW from scratch is far riskier than using a maintained library. |
-| Replace cJSON with SAX parser (jsmn) | GPT | cJSON is adequate. Profiling should drive this decision, not speculation. |
-| Replace hand-rolled msgpack with library | Gemini | Our struct set is small and fixed. Hand-rolled pack/unpack with bounds checking is simpler than integrating a library and handling its API. Version byte + unknown-key tolerance addresses the schema concern. |
-
----
-
-## 17. Competitive Comparison
-
-This section compares mnemon_ai against every memory MCP server evaluated in the [Landscape Report](memory-mcp-report-v2.md) plus emerging projects from the [Research Synthesis](research-synthesis.md).
-
-**Competitors:** Official Memory Server, Zep/Graphiti, Mem0 Platform, OpenMemory Local, Basic Memory, Cognee, Chroma MCP, Shodh Memory, A-MEM, EverMemOS, MemOS.
-
-### 17.1 Architecture Overview
-
-| Dimension | Official Memory | Zep/Graphiti | Mem0 Platform | OpenMemory Local | Basic Memory | Cognee | Chroma MCP | **mnemon_ai** |
-|---|---|---|---|---|---|---|---|---|
-| **Language** | TypeScript | Python | Managed | Python | Python | Python | Python | **C** |
-| **Process Model** | subprocess | Docker + Neo4j | Cloud SaaS | Docker stack | subprocess | Docker + backends | embedded or server | **UNIX daemon** |
-| **Docker Required** | No | Yes | N/A | Yes | No | Yes | No | **No** |
-| **Cloud Dependency** | None | OpenAI key | Full cloud | OpenAI key | None | LLM key | Optional | **None** |
-| **Data Sovereignty** | Local file | Self-hosted Neo4j | Data leaves machine | Local Docker volumes | Local files | Self-hosted | Configurable | **100% local filesystem** |
-| **Storage Backend** | In-memory JSON, JSONL | Neo4j + embeddings | Managed cloud | Qdrant | Markdown + SQLite FTS5 | Neo4j/FalkorDB + Qdrant/Weaviate | Chroma HNSW | **LMDB + SQLite FTS5 + usearch** |
-| **Resource Footprint** | ~50MB | ~4GB+ | N/A | ~2GB+ | ~100MB | ~4GB+ | ~200MB | **~200MB** |
-| **License** | MIT | Apache 2.0 | Proprietary | Apache 2.0 | AGPL-3.0 | Apache 2.0 | Apache 2.0 | **TBD (MIT or Apache 2.0)** |
-
-### 17.2 Search Capabilities
-
-| Capability | Official Memory | Zep/Graphiti | Mem0 Platform | OpenMemory Local | Basic Memory | Cognee | Chroma MCP | **mnemon_ai** |
-|---|---|---|---|---|---|---|---|---|
-| **Keyword/FTS** | No (full dump) | Yes (BM25) | Yes | Yes | Yes (FTS5) | Yes | Yes | **Yes (FTS5 BM25)** |
-| **Semantic/Vector** | No | Yes | Yes | Yes | No | Yes | Yes (best in class) | **Yes (usearch HNSW)** |
-| **Graph Traversal** | No | Yes (Neo4j) | Pro tier only | No | No | Yes | No | **Yes (LMDB BFS)** |
-| **Hybrid Fusion** | No | Yes | Limited | No | No | Yes | Yes | **Yes (RRF, 3 rankers)** |
-| **Temporal Queries** | No | Yes (bi-temporal) | No | No | No | No | No | **Yes (bi-temporal)** |
-| **Context Budget Control** | No (full dump) | Configurable | Managed | Limited | No | Limited | Top-K | **Hard caps (OWASP MCP03)** |
-
-Only mnemon_ai and Zep/Graphiti combine graph + vector + keyword search. Unlike Zep, mnemon_ai does not require Neo4j. All three search backends are in-process with zero network hops.
-
-### 17.3 Memory Intelligence
-
-| Capability | Official Memory | Zep/Graphiti | Mem0 Platform | OpenMemory Local | Basic Memory | Cognee | Chroma MCP | **mnemon_ai** |
-|---|---|---|---|---|---|---|---|---|
-| **Entity Extraction** | Manual | LLM auto | LLM auto | LLM auto | Manual | LLM auto | None | **External LLM (optional)** |
-| **Relationship Tracking** | Yes (manual) | Yes (auto) | Pro tier | No | Yes (manual) | Yes (auto) | No | **Yes (manual + auto)** |
-| **Deduplication** | No | Yes | Yes (auto) | Yes | No | Yes | No | **No (Phase 5)** |
-| **Conflict Resolution** | No | Yes (temporal) | Yes (auto) | Limited | No | Limited | No | **Yes (bi-temporal invalidation)** |
-| **Consolidation** | No | No | Managed | No | No | No | No | **Yes (episodic to semantic)** |
-| **Importance/Decay** | No | No | No | No | No | No | No | **Yes (Hebbian + exponential)** |
-| **Multi-tier Memory** | No | No | Managed | No | No | No | Collections | **Yes (episodic/semantic/procedural)** |
-
-Consolidation, importance scoring, and temporal decay are unique to mnemon_ai. No existing memory MCP server has any of these.
-
-### 17.4 Data Ingestion
-
-This is mnemon_ai's largest differentiator. Every existing memory MCP server is designed for agent-driven memory only -- the LLM stores memories during conversation. None support bulk import from external sources.
-
-| Capability | Official Memory | Zep/Graphiti | Mem0 Platform | OpenMemory Local | Basic Memory | Cognee | Chroma MCP | **mnemon_ai** |
-|---|---|---|---|---|---|---|---|---|
-| **Agent-driven store** | Yes | Yes | Yes | Yes | Yes | Yes | Yes | **Yes** |
-| **Bulk batch import** | No | No | API (not MCP) | No | No | Pipeline | API (not MCP) | **Yes (import_batch)** |
-| **File import (JSONL/CSV)** | No | No | No | No | No | No | No | **Yes (import_file)** |
-| **Email import (mbox)** | No | No | No | No | No | No | No | **Yes (auto From/Date/ID)** |
-| **Text/Markdown import** | No | No | No | No | Markdown native | PDF/audio/images | No | **Yes (configurable chunking)** |
-| **Directory walk** | No | No | No | No | No | No | No | **Yes (import_directory)** |
-| **Import progress tracking** | N/A | N/A | N/A | N/A | N/A | N/A | N/A | **Yes (get_import_status)** |
-| **Source metadata** | Minimal | Timestamps | Managed | Limited | Filename | Doc metadata | Collection | **Full (type, id, author, timestamp, tags)** |
-| **Browsable listing** | Full dump | Limited | API | UI | File browser | Limited | Collection list | **Yes (list_memories, paginated)** |
-
-Cognee has a document pipeline for PDFs/audio/images (which mnemon_ai does not handle), but it is not exposed as MCP tools and requires Docker + multiple backends.
-
-### 17.5 Hardware and Performance
-
-| Dimension | Official Memory | Zep/Graphiti | Mem0 Platform | OpenMemory Local | Basic Memory | Cognee | Chroma MCP | **mnemon_ai** |
-|---|---|---|---|---|---|---|---|---|
-| **Hardware Awareness** | None | None | N/A | None | None | None | None | **GPU, SIMD, NUMA** |
-| **GPU Acceleration** | No | Neo4j (limited) | Managed | No | No | No | No | **Yes (CUDA embeddings)** |
-| **SIMD Optimization** | No | No | N/A | No | No | No | No | **Yes (AVX2, AVX-512)** |
-| **Local Embeddings** | No | No (OpenAI) | Managed | No (OpenAI) | No | No (LLM key) | No (external) | **Yes (llama.cpp in-process)** |
-| **Zero-copy Reads** | No | No | N/A | No | No | No | No | **Yes (LMDB mmap)** |
-| **Search Latency** | O(n) scan | 200-800ms | Managed | Varies | <50ms (FTS) | Varies | <50ms | **<10ms target (all in-process)** |
-
-No other memory MCP server has any hardware awareness. mnemon_ai is the only one that generates embeddings locally without an external API key.
-
-### 17.6 Security Posture
-
-| Dimension | Official Memory | Zep/Graphiti | Mem0 Platform | OpenMemory Local | Basic Memory | Cognee | Chroma MCP | **mnemon_ai** |
-|---|---|---|---|---|---|---|---|---|
-| **Secret Detection** | No | No | Managed | No | No | No | No | **Yes (FSM, write + read)** |
-| **Input Validation** | Minimal | Backend | Managed | Backend | Minimal | Backend | Backend | **JSON Schema + FTS5 sanitize** |
-| **Context Caps** | No | Configurable | Managed | Limited | No | Limited | Top-K | **Hard caps** |
-| **systemd Hardening** | No | No | N/A | No | No | No | No | **Yes** |
-| **OWASP MCP Coverage** | 0/5 | 2/5 | Managed | 1/5 | 1/5 | 1/5 | 2/5 | **5/5** |
-| **Model Integrity** | N/A | N/A | N/A | N/A | N/A | N/A | N/A | **SHA-256 verify** |
-
-### 17.7 Operational Model
-
-| Dimension | Official Memory | Zep/Graphiti | Mem0 Platform | OpenMemory Local | Basic Memory | Cognee | Chroma MCP | **mnemon_ai** |
-|---|---|---|---|---|---|---|---|---|
-| **Deployment** | npx | Docker Compose | Cloud | Docker Compose | uvx | Docker Compose | pip install | **Single binary + systemd** |
-| **Multi-client** | No (stdio) | Yes (HTTP) | Yes (cloud) | Yes (HTTP) | No (stdio) | Yes (HTTP) | Yes (server) | **Yes (stdio + HTTP)** |
-| **systemd Integration** | No | No | N/A | No | No | No | No | **Yes (Type=notify, watchdog)** |
-| **Signal Handling** | None | Docker | N/A | Docker | None | Docker | None | **POSIX (HUP/USR1/TERM)** |
-| **Crash Recovery** | None | Neo4j | Managed | Qdrant | SQLite WAL | Backend | Chroma | **Intent log + LMDB ACID** |
-
-### 17.8 Emerging Projects
-
-| Dimension | Shodh Memory | A-MEM | EverMemOS | MemOS | **mnemon_ai** |
-|---|---|---|---|---|---|
-| **Language** | Rust | Python | Python | Python | **C** |
-| **Key Innovation** | Hebbian associative memory | Zettelkasten notes | Engram lifecycle | Memory as OS resource | **All combined** |
-| **Hardware Aware** | No | No | No | No | **Yes** |
-| **MCP Support** | Yes (37 tools) | No | No | No | **Yes (35 tools)** |
-| **Bulk Import** | No | No | No | No | **Yes** |
-| **Production Ready** | Early | Research | Research | Research | **Phase 1 target** |
-
-mnemon_ai draws from all four: Hebbian decay from Shodh/SAGE, consolidation from EverMemOS, multi-tier memory from survey literature. It is the only one in C with hardware awareness and practical bulk import.
-
-### 17.9 Summary
-
-**Clear wins (no competitor has these):**
-- C-native single-binary daemon with systemd integration
-- Hardware-aware (GPU/SIMD/NUMA auto-detection and dispatch)
-- Local embedding generation with zero API key dependency
-- Bulk import from external sources (email, Slack, transcripts, documents) with rich source metadata
-- Memory lifecycle (consolidation, Hebbian decay, multi-tier)
-- FSM secret detection on write and read paths
-- OWASP MCP Top 10 coverage (5/5 relevant categories)
-- All-in-process search with zero network hops
-
-**At parity with best-in-class:**
-- Bi-temporal tracking (matches Zep/Graphiti)
-- Hybrid retrieval with RRF fusion (matches Zep without Neo4j)
-- Entity/relationship tracking (matches Official Memory and Zep)
-- Data sovereignty (matches Basic Memory)
-- Crash recovery (matches or exceeds all)
-
-**Gaps to address:**
-- No automatic deduplication at ingest (Mem0 and Zep handle this; planned Phase 5)
-- No web UI (OpenMemory Local has one; could be a separate project)
-- No multi-modal ingestion (Cognee handles PDFs/audio/images; mnemon_ai is text-only)
-- No Obsidian integration (Basic Memory's Markdown files open in Obsidian; could add an export tool)
-- Entity extraction requires external llama-server (competitors embed extraction but require API keys)
-- Entity extraction requires external llama-server (competitors embed extraction but require API keys)
-
----
-
-## 18. Implementation Status (2026-04-04)
-
-Phase 1 is fully implemented. This section documents deviations from the architecture and lessons learned during implementation.
-
-### 18.1 What Was Built
-
-| Module | Lines | Status | Notes |
-|--------|-------|--------|-------|
-| main.c | 330 | Complete | CLI args, init/shutdown, signal handling |
-| mnemon.h + mnemon_err.c | 340 | Complete | All types, error codes, _free() functions |
-| config.c | 270 | Complete | INI parser, defaults, tilde expansion, validation |
-| log.c | 115 | Complete | Three-mode logging: foreground/syslog/stderr |
-| daemon.c | 150 | Complete | Double-fork, PID file, sd_notify |
-| id.c | 140 | Complete | UUIDv7 via clock_gettime + /dev/urandom |
-| graph.c | 870 | Complete | LMDB + hand-rolled msgpack (~200 lines pack/unpack) |
-| fts.c | 320 | Complete | FTS5 with query sanitization, BM25 search |
-| vector.c | 310 | Complete | usearch wrapper with key-UUID hash map |
-| embed.c | 190 | Complete | llama.cpp C API wrapper |
-| storage.c | 490 | Complete | 5-step write sequence with intent log |
-| search.c | 450 | Complete | Hybrid RRF fusion, single-txn result fetch |
-| mcp_stdio.c | 140 | Complete | 1MB line buffer, SIGPIPE handling |
-| mcp_dispatch.c | 190 | Complete | JSON-RPC 2.0, MCP 2024-11-05 protocol |
-| mcp_tools.c | 490 | Complete | 15 tool handlers with JSON Schema |
-| import.c | 400 | Complete | JSONL/CSV/mbox/text parsers, chunking |
-| secret.c | 270 | Complete | 7 pattern types + Shannon entropy |
-| hardware.c | 185 | Complete | /proc/cpuinfo, NVML dlopen, SIMD dispatch |
-| memory.c | 90 | Complete | Hebbian decay, ISO 8601 parsing |
-| temporal.c | 250 | Complete | Time-filtered scan, get_state_at_time, get_history, get_changes_since |
-| consolidate.c | 280 | Complete | Clustering + entity merge (name+type dedup, observation merge) |
-| extract.c | 270 | Complete | Full libcurl HTTP client, structured prompt, response parsing |
-| threads.c | 280 | Complete | MPSC writer queue, reader pool, shutdown coordination |
-| sse.c | 145 | Complete | Thread-safe ring buffer event queue for SSE streaming |
-| admit.c | 100 | Complete | Boilerplate content filtering |
-| audit.c | 80 | Complete | Append-only JSON operation log |
-| model_mgr.c | 200 | Complete | Auto-detect hardware, recommend model, download from HuggingFace |
-| SIMD (3 files) | 320 | Complete | Scalar + AVX2 + AVX-512 distance functions |
-| **Total** | **~12,500** | | |
-
-### 18.2 Architecture Deviations
-
-1. **C++ in build:** Architecture said "No C++ in core code." Implementation adds `CXX` to CMake LANGUAGES because usearch's C API (`lib.cpp`) requires C++ compilation. All C++ is isolated in `third_party/usearch/`. No C++ in `src/`.
-
-2. **SQLite3 vendored:** Architecture specified "System package." Implementation vendors the SQLite3 amalgamation to eliminate the system dependency and guarantee FTS5 availability.
-
-3. **15 tools, not 16:** `import_batch` from the architecture is implemented in `import.c` but not exposed as a separate MCP tool in Phase 1. Accessible via `import_file` with JSONL format.
-
-4. **Threading:** Architecture describes writer thread + reader pool. Phase 1 was single-threaded. Phase 9 added persistent reader pool (`mnemon_reader_pool_t` in `threads.c`) and parallel search ranker dispatch. Search uses the pool when `reader_pool_size > 0`, falls back to ad-hoc pthreads.
-
-5. **Msgpack nil handling:** The architecture's msgpack design did not account for nullable embedding fields. Implementation adds explicit nil byte (`0xc0`) checking before `mpr_bin()` calls to prevent reader misalignment.
-
-6. **POSIX feature macros:** Architecture assumed C11 standard library includes POSIX functions. Implementation requires `_POSIX_C_SOURCE=200809L` for `strdup`, `realpath`, `clock_gettime`, `timegm`, and `strncasecmp`. Without this, pointers are silently truncated to 32 bits on x86_64 (see VIBE_HISTORY.md for full post-mortem).
-
-### 18.3 Test Results
+### 16.1 Test Suites
 
 | Suite | Tests | Coverage |
 |-------|-------|----------|
@@ -2034,15 +1737,15 @@ Phase 1 is fully implemented. This section documents deviations from the archite
 | test_vector | 7 | Add/remove/search, entity isolation, save/load persistence, empty search, rwlock |
 | test_search | 6 | Keyword, hybrid RRF, no results, top_k cap, empty query, UUID validity |
 | test_mcp | 42 | All 35 tools + MCP lifecycle + tools/list schema + 3 error codes + isError + secret rejection + content size cap |
-| test_temporal | 24 | ISO 8601, decay math, UUID ops, importance update, prune, **admit control**, **audit log**, **model manager** |
+| test_temporal | 24 | ISO 8601, decay math, UUID ops, importance update, prune, admit control, audit log, model manager |
 | test_secret | 33 | All 7 pattern types, false positives, edge cases, entropy |
-| test_storage | 24 | Full-field round-trip, 10KB content, unicode, tags, bulk 50, delete+FTS, **delete entity**, **edges_to**, **rebuild indexes**, **replay intents**, **storage accessors** |
+| test_storage | 24 | Full-field round-trip, 10KB content, unicode, tags, bulk 50, delete+FTS, delete entity, edges_to, rebuild indexes, replay intents, storage accessors |
 | test_mcp_client.py | 105 | All 35 tools end-to-end over stdio, MCP spec conformance, schema validation |
 | test_mcp_http.py | 42 | All 35 tools over HTTP, auth, sessions, CORS |
 | test_mcp_perf.py | -- | Latency/throughput at 100/1000 memory scale |
 | **Total** | **343** | |
 
-### 18.4 Performance Benchmarks (AMD Ryzen AI MAX+ 395, 32 cores)
+### 16.2 Performance Benchmarks (AMD Ryzen AI MAX+ 395, 32 cores)
 
 | Operation | 100 memories | 1,000 memories |
 |-----------|-------------|----------------|
@@ -2053,7 +1756,7 @@ Phase 1 is fully implemented. This section documents deviations from the archite
 | keyword search p50 | 120us | 530us |
 | stats query | 20us | 30us |
 
-### 18.5 LongMemEval Benchmark (2026-04-08)
+### 16.3 LongMemEval Benchmark (2026-04-08)
 
 Real-world retrieval evaluation using the LongMemEval dataset (Wu et al., ICLR 2025). 500 questions, 7 question types, 5 memory abilities. Full results in `doc/BENCHMARK-REPORT.md`.
 
@@ -2072,10 +1775,10 @@ Bugs found: embedding `n_ubatch` assertion crash, secret detection URL false pos
 
 New tools added for temporal reasoning: `extract_events`, `search_events`, `calculate_duration`.
 
-### 18.6 Security Audit (2026-04-04)
+### 16.4 Security Audit (2026-04-04)
 
 8 vulnerabilities found and fixed. See CLAUDE.md for the full table.
 
 ---
 
-*End of architecture document. v0.4 -- all phases complete. Primary improvement area: retrieval ranking quality at scale (see BENCHMARK-REPORT.md).*
+*End of architecture document. v0.4*
