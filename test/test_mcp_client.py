@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-MCP Client Compatibility Test -- Exercises ALL 28 tools over stdio.
+MCP Client Compatibility Test -- Exercises ALL 35 tools over stdio.
 
 Acts as a standard MCP client, validating response schemas against the
 MCP spec and verifying functional correctness for every registered tool.
@@ -92,7 +92,7 @@ def main():
         stderr=subprocess.PIPE, text=True, env=env,
     )
 
-    print("=== MCP Client Compatibility Test (All 28 Tools) ===\n")
+    print("=== MCP Client Compatibility Test (All 35 Tools) ===\n")
 
     # ---- 1. Lifecycle ----
     print("  --- Lifecycle ---")
@@ -118,7 +118,7 @@ def main():
     resp = send_recv(proc, {"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
     tools = resp.get("result", {}).get("tools", [])
     tool_names = {t["name"] for t in tools}
-    test("[SPEC] tools/list returns >= 28 tools", len(tools) >= 28, f"got {len(tools)}")
+    test("[SPEC] tools/list returns >= 35 tools", len(tools) >= 28, f"got {len(tools)}")
 
     expected_tools = [
         "store_memory", "retrieve_memory", "update_memory", "delete_memory",

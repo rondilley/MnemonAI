@@ -115,6 +115,10 @@ mnemon_err_t mnemon_embed_init(mnemon_embed_t **out, const char *model_path,
      * WARN/ERROR still logged; INFO/DEBUG go to our debug level. */
     llama_log_set(llama_log_callback, NULL);
 
+    /* Prevent ggml from spawning GDB for backtraces on errors.
+     * GDB inherits stdout, corrupting the MCP JSON-RPC channel. */
+    setenv("GGML_NO_BACKTRACE", "1", 1);
+
     /* When GPU is not requested, hide GPU devices from the HIP/CUDA runtime
      * entirely. Without this, the ROCm runtime initializes during
      * llama_backend_init() and can hang on certain GPU targets (e.g.,
@@ -156,8 +160,14 @@ mnemon_err_t mnemon_embed_init(mnemon_embed_t **out, const char *model_path,
     /* Create context -- this triggers GPU JIT kernel compilation on first
      * run with ROCm/CUDA. Can take minutes for new GPU targets. */
     struct llama_context_params cparams = llama_context_default_params();
-    cparams.n_ctx = 2048;
-    cparams.n_batch = 512;
+    /* Use the model's training context length. nomic-embed-text-v1.5
+     * was trained with 2048 tokens. n_batch and n_ubatch must be >=
+     * n_tokens for encoder (embedding) models per llama.cpp assertion. */
+    int n_ctx_train = (int)llama_model_n_ctx_train(e->model);
+    if (n_ctx_train <= 0) n_ctx_train = 2048;
+    cparams.n_ctx = (uint32_t)n_ctx_train;
+    cparams.n_batch = (uint32_t)n_ctx_train;
+    cparams.n_ubatch = (uint32_t)n_ctx_train;
     cparams.n_threads = n_threads > 0 ? (uint32_t)n_threads : 4;
     cparams.n_threads_batch = cparams.n_threads;
     cparams.embeddings = true;
@@ -219,7 +229,9 @@ mnemon_err_t mnemon_embed_text(mnemon_embed_t *e, const char *text,
                               (int32_t)text_len, tokens, max_tokens,
                               true, false);
     if (n_tokens < 0) {
-        mnemon_err_set(MNEMON_ERR_EMBED, 0, "tokenization failed");
+        mnemon_err_set(MNEMON_ERR_EMBED, 0,
+                       "text exceeds embedding context (%zu chars, "
+                       "%d token limit)", text_len, max_tokens);
         free(tokens);
         return MNEMON_ERR_EMBED;
     }

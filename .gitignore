@@ -80,6 +80,14 @@ _CPack_Packages/
 venv/
 .venv/
 
+# Python scratch/temporary files
+__pycache__/
+*.py[cod]
+*.pyo
+*.egg-info/
+*.jsonl
+*.judged.jsonl
+
 # GGUF model files
 models/*.gguf
 

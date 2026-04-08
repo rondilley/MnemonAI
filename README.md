@@ -16,8 +16,9 @@ Every piece of data stays on your local filesystem. No API keys required for cor
 - **Hardware-Aware** -- auto-detects AMD/NVIDIA/Intel GPU, AMD XDNA NPU, SIMD (AVX2/AVX-512), and NUMA at runtime
 - **Network MCP Server** -- Streamable HTTP transport (MCP 2025-03-26 spec) with TLS, Bearer auth, session management, SSE streaming, and Origin validation. Run one instance on a server, connect from any machine.
 - **Memory Lifecycle** -- multi-tier memory (episodic/semantic/procedural), Hebbian importance decay, episodic-to-semantic consolidation with automatic entity deduplication and merge
-- **Bulk Import** -- ingest email (mbox), CSV, JSONL, Markdown, and plain text with rich source metadata, configurable chunking, recursive directory traversal, and background job tracking
-- **32 MCP Tools** -- Memory CRUD, entity/graph, four search modes, temporal queries, bulk import, maintenance, hardware introspection, and admin tools
+- **Temporal Event System** -- extract dated events from conversation text, search by event date (not storage time), deterministic date arithmetic. Backdatable `created_at` timestamps for historical import.
+- **Bulk Import** -- ingest email (mbox), CSV, JSONL, Markdown, and plain text with rich source metadata, configurable chunking, recursive directory traversal, background job tracking, and source timestamp preservation
+- **35 MCP Tools** -- Memory CRUD, entity/graph, four search modes, temporal queries and event tools, bulk import, maintenance, hardware introspection, and admin tools
 - **Security** -- FSM-based secret detection, prompt injection scanner (integrated into store path), content size limits, auth brute-force detection (per-IP rate limiting), IP allow list, enumeration detection, credential query detection, audit logging, OWASP MCP Top 10 mitigations
 - **Crash-Safe** -- LMDB (ACID, mmap, zero-copy), write-ahead intent log, rebuildable derived indexes (FTS5 + usearch)
 
@@ -56,11 +57,11 @@ graph TB
 
 ## Status
 
-**All phases complete. No known gaps.** Dual transport (stdio + Streamable HTTP with SSE), 32 MCP tools, parallel hybrid search with RRF fusion, network server with TLS/auth/sessions/IP filtering, hardware detection (AMD/NVIDIA GPU, AMD NPU, SIMD), auto-model download, entity extraction, prompt injection detection, auth brute-force detection, admission control, audit logging, persistent reader pool, recursive imports with background job tracking, and entity merging in consolidation.
+**All phases complete. No known gaps.** Dual transport (stdio + Streamable HTTP with SSE), 35 MCP tools, parallel hybrid search with RRF fusion, network server with TLS/auth/sessions/IP filtering, hardware detection (AMD/NVIDIA GPU, AMD NPU, SIMD), auto-model download, entity extraction, prompt injection detection, auth brute-force detection, admission control, audit logging, persistent reader pool, recursive imports with background job tracking, and entity merging in consolidation.
 
 - 12,500+ lines of C source across 30 modules
 - 343 tests (196 C unit + 105 Python stdio + 42 Python HTTP)
-- 32 MCP tools, all tested at API, stdio, and HTTP levels
+- 35 MCP tools, all tested at API, stdio, and HTTP levels
 - GPU-accelerated embedding via ROCm HIP (AMD) or CUDA (NVIDIA)
 - AVX-512/AVX2 SIMD for vector distance computation and L2 normalization
 - Persistent reader thread pool for parallel search dispatch

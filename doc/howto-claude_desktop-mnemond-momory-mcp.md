@@ -135,14 +135,21 @@ Four search modes, each optimized for different retrieval patterns:
 | `search_keyword` | FTS5 / BM25 | Exact terms, names, error codes, specific strings |
 | `search_semantic` | Vector similarity | Conceptual / fuzzy queries ("what do I know about network segmentation?") |
 | `search_hybrid` | Graph + vector + keyword with RRF fusion | General-purpose — best default choice |
-| `search_temporal` | Time-filtered | "What did I store last week?" — uses `since` and `until` (ISO datetime) |
+| `search_temporal` | Time-filtered by storage date | "What did I store last week?" -- uses `since` and `until` (ISO datetime) |
+| `search_events` | Search by actual event dates | "What events happened in January?" -- searches dates mentioned in content |
+| `calculate_duration` | Date arithmetic | "How many days between event X and event Y?" -- deterministic, no LLM math |
+| `extract_events` | Parse dates from text | Creates searchable event entities from content mentioning dates |
 
 All accept `top_k` to control how many results come back.
+
+**Important distinction:** `search_temporal` filters by when a memory was *stored*. `search_events` filters by when an event *happened* (dates found in the text content). For questions like "what happened between January and March?", use `search_events`.
 
 **Example prompts:**
 > "Search my memory for anything about the Questco engagement."
 > "What have I stored in the last 48 hours?"
 > "Do a semantic search for 'privileged account naming conventions'."
+> "How many days between the workshop on January 10th and the meeting on January 17th?"
+> "What events happened in February 2024?"
 
 ### 5.3 Knowledge Graph (Entities & Relations)
 

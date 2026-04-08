@@ -588,6 +588,66 @@ if(BUILD_TESTING)
             COMMAND test_${test_name}
         )
     endforeach()
+
+    # ------------------------------------------------------------------
+    #  Python integration tests (require mnemond binary + Python 3)
+    # ------------------------------------------------------------------
+    find_package(Python3 COMPONENTS Interpreter QUIET)
+    if(Python3_FOUND)
+        # MCP client compatibility (all 35 tools, stdio transport)
+        add_test(
+            NAME    mcp_client
+            COMMAND "${Python3_EXECUTABLE}"
+                    "${CMAKE_SOURCE_DIR}/test/test_mcp_client.py"
+            WORKING_DIRECTORY "${CMAKE_BINARY_DIR}"
+        )
+        set_tests_properties(mcp_client PROPERTIES
+            LABELS "python;integration"
+            TIMEOUT 120
+        )
+
+        # MCP HTTP transport
+        add_test(
+            NAME    mcp_http
+            COMMAND "${Python3_EXECUTABLE}"
+                    "${CMAKE_SOURCE_DIR}/test/test_mcp_http.py"
+            WORKING_DIRECTORY "${CMAKE_BINARY_DIR}"
+        )
+        set_tests_properties(mcp_http PROPERTIES
+            LABELS "python;integration"
+            TIMEOUT 120
+        )
+
+        # Performance benchmarks
+        add_test(
+            NAME    mcp_perf
+            COMMAND "${Python3_EXECUTABLE}"
+                    "${CMAKE_SOURCE_DIR}/test/test_mcp_perf.py"
+            WORKING_DIRECTORY "${CMAKE_BINARY_DIR}"
+        )
+        set_tests_properties(mcp_perf PROPERTIES
+            LABELS "python;benchmark"
+            TIMEOUT 300
+        )
+
+        # LongMemEval benchmark -- quick smoke test (no agent, no judges)
+        # Full benchmark: python3 ../test/test_longmemeval.py generate
+        add_test(
+            NAME    longmemeval
+            COMMAND "${CMAKE_COMMAND}" -E env
+                    "MNEMON_LONGMEMEVAL_AGENT=none"
+                    "MNEMON_LONGMEMEVAL_JUDGES=none"
+                    "MNEMON_LONGMEMEVAL_LIMIT=10"
+                    "${Python3_EXECUTABLE}"
+                    "${CMAKE_SOURCE_DIR}/test/test_longmemeval.py"
+                    "generate"
+            WORKING_DIRECTORY "${CMAKE_BINARY_DIR}"
+        )
+        set_tests_properties(longmemeval PROPERTIES
+            LABELS "python;benchmark;longmemeval"
+            TIMEOUT 60
+        )
+    endif()
 endif()
 
 # ======================================================================

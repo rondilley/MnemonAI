@@ -149,7 +149,15 @@ static cJSON *tool_store_memory(mnemon_storage_t *s, const cJSON *params)
     const char *sa = json_str(params, "source_author", NULL);
     mem.source_author = sa ? strdup(sa) : NULL;
     mem.importance = 0.5f;
-    mem.created_at = mnemon_time_ms();
+
+    /* Optional created_at override (ISO8601); defaults to now */
+    const char *ca_str = json_str(params, "created_at", NULL);
+    if (ca_str) {
+        int64_t ca = mnemon_parse_iso8601(ca_str);
+        mem.created_at = (ca > 0) ? ca : mnemon_time_ms();
+    } else {
+        mem.created_at = mnemon_time_ms();
+    }
     mem.last_accessed = mem.created_at;
 
     /* Tier */
@@ -822,7 +830,14 @@ static cJSON *tool_import_batch(mnemon_storage_t *s, const cJSON *params)
         const char *sa = json_str(item, "source_author", NULL);
         mem.source_author = sa ? strdup(sa) : NULL;
         mem.importance = 0.5f;
-        mem.created_at = mnemon_time_ms();
+
+        const char *ca_str = json_str(item, "created_at", NULL);
+        if (ca_str) {
+            int64_t ca = mnemon_parse_iso8601(ca_str);
+            mem.created_at = (ca > 0) ? ca : mnemon_time_ms();
+        } else {
+            mem.created_at = mnemon_time_ms();
+        }
         mem.last_accessed = mem.created_at;
 
         const char *tier_str = json_str(item, "tier", "episodic");
@@ -874,6 +889,7 @@ static cJSON *tool_import_file(mnemon_storage_t *s, const cJSON *params)
     opts.source_type = json_str(params, "source_type", "import");
     opts.chunking = json_str(params, "chunking", "paragraph");
     opts.max_chunk_size = json_int(params, "max_chunk_size", 4096);
+    opts.preserve_timestamps = json_bool(params, "preserve_timestamps", false);
 
     mnemon_import_result_t result_data = {0};
     mnemon_err_t err = mnemon_import_file(s, path, format, &opts, &result_data);
@@ -1054,6 +1070,7 @@ static cJSON *tool_import_directory(mnemon_storage_t *s, const cJSON *params)
     opts.source_type = source_type;
     opts.chunking = chunking;
     opts.max_chunk_size = json_int(params, "max_chunk_size", 4096);
+    opts.preserve_timestamps = json_bool(params, "preserve_timestamps", false);
 
     if (async) {
         /* Launch background import job */
@@ -1491,6 +1508,160 @@ static cJSON *tool_decoy_config(mnemon_storage_t *s, const cJSON *params)
     return r;
 }
 
+/* ---- Temporal Event Tools ---- */
+
+static cJSON *tool_extract_events(mnemon_storage_t *s, const cJSON *params)
+{
+    const char *content = json_str(params, "content", NULL);
+    if (!content) {
+        cJSON *e = cJSON_CreateObject();
+        cJSON_AddStringToObject(e, "error", "content required");
+        return e;
+    }
+
+    int context_year = json_int(params, "context_year", 2023);
+    bool create_entities = json_bool(params, "create_entities", true);
+
+    mnemon_event_list_t events = {0};
+    mnemon_extract_events(content, context_year, &events);
+
+    cJSON *result = cJSON_CreateObject();
+    cJSON *arr = cJSON_AddArrayToObject(result, "events");
+    int created = 0;
+
+    for (int i = 0; i < events.count; i++) {
+        cJSON *evt = cJSON_CreateObject();
+        cJSON_AddStringToObject(evt, "description",
+                                events.events[i].description);
+        char ts[32];
+        mnemon_format_iso8601(events.events[i].event_date, ts, sizeof(ts));
+        cJSON_AddStringToObject(evt, "event_date", ts);
+        cJSON_AddNumberToObject(evt, "days_epoch",
+            (double)(events.events[i].event_date / (86400LL * 1000)));
+
+        /* Optionally create entity for each event */
+        if (create_entities && events.events[i].description) {
+            mnemon_entity_t ent = {0};
+            mnemon_uuid_t u;
+            mnemon_uuid_generate(&u);
+            memcpy(ent.id, u.bytes, 16);
+
+            /* Use first ~60 chars of description as name */
+            char name[64];
+            snprintf(name, sizeof(name), "%.60s",
+                     events.events[i].description);
+            /* Trim at word boundary */
+            char *sp = strrchr(name, ' ');
+            if (sp && sp - name > 30) *sp = '\0';
+
+            ent.name = strdup(name);
+            ent.entity_type = strdup("event");
+            ent.event_date = events.events[i].event_date;
+            ent.importance = 0.5f;
+            ent.created_at = mnemon_time_ms();
+            ent.updated_at = ent.created_at;
+            ent.observations = calloc(1, sizeof(char *));
+            if (ent.observations) {
+                ent.observations[0] = strdup(events.events[i].description);
+                ent.observation_count = 1;
+            }
+
+            if (mnemon_store_entity(s, &ent) == MNEMON_OK) {
+                char eid[37];
+                mnemon_uuid_to_string(&u, eid, sizeof(eid));
+                cJSON_AddStringToObject(evt, "entity_id", eid);
+                created++;
+            }
+            mnemon_entity_free(&ent);
+        }
+
+        cJSON_AddItemToArray(arr, evt);
+    }
+
+    cJSON_AddNumberToObject(result, "extracted", events.count);
+    cJSON_AddNumberToObject(result, "entities_created", created);
+
+    mnemon_event_list_free(&events);
+    return result;
+}
+
+static cJSON *tool_search_events(mnemon_storage_t *s, const cJSON *params)
+{
+    int64_t since = 0, until = 0;
+    const char *since_str = json_str(params, "since", NULL);
+    const char *until_str = json_str(params, "until", NULL);
+    const char *name = json_str(params, "name", NULL);
+    int top_k = json_int(params, "top_k", 20);
+
+    if (since_str) since = mnemon_parse_iso8601(since_str);
+    if (until_str) until = mnemon_parse_iso8601(until_str);
+
+    /* Also try natural date parsing for convenience */
+    if (since_str && since == 0)
+        since = mnemon_parse_natural_date(since_str, 2023);
+    if (until_str && until == 0)
+        until = mnemon_parse_natural_date(until_str, 2023);
+
+    mnemon_result_set_t rs = {0};
+    mnemon_search_events(s, since, until, name, top_k, &rs);
+
+    cJSON *result = result_set_to_json(&rs);
+    mnemon_result_set_free(&rs);
+    return result;
+}
+
+static cJSON *tool_calculate_duration(mnemon_storage_t *s, const cJSON *params)
+{
+    (void)s;
+
+    const char *from_str = json_str(params, "from", NULL);
+    const char *to_str = json_str(params, "to", NULL);
+
+    if (!from_str || !to_str) {
+        cJSON *e = cJSON_CreateObject();
+        cJSON_AddStringToObject(e, "error",
+            "both 'from' and 'to' dates are required");
+        return e;
+    }
+
+    int context_year = json_int(params, "context_year", 2023);
+
+    /* Parse dates -- try ISO8601 first, then natural language */
+    int64_t from_ms = mnemon_parse_iso8601(from_str);
+    if (from_ms == 0) from_ms = mnemon_parse_natural_date(from_str, context_year);
+    int64_t to_ms = mnemon_parse_iso8601(to_str);
+    if (to_ms == 0) to_ms = mnemon_parse_natural_date(to_str, context_year);
+
+    if (from_ms <= 0 || to_ms <= 0) {
+        cJSON *e = cJSON_CreateObject();
+        cJSON_AddStringToObject(e, "error", "could not parse one or both dates");
+        if (from_ms <= 0) cJSON_AddStringToObject(e, "from_raw", from_str);
+        if (to_ms <= 0) cJSON_AddStringToObject(e, "to_raw", to_str);
+        return e;
+    }
+
+    int days = mnemon_duration_days(from_ms, to_ms);
+    bool from_is_earlier = (from_ms <= to_ms);
+
+    cJSON *result = cJSON_CreateObject();
+    cJSON_AddNumberToObject(result, "days", days);
+    cJSON_AddNumberToObject(result, "days_inclusive", days + 1);
+
+    char buf[32];
+    mnemon_format_iso8601(from_ms, buf, sizeof(buf));
+    cJSON_AddStringToObject(result, "from", buf);
+    mnemon_format_iso8601(to_ms, buf, sizeof(buf));
+    cJSON_AddStringToObject(result, "to", buf);
+    cJSON_AddBoolToObject(result, "from_is_earlier", from_is_earlier);
+
+    if (days >= 7) {
+        cJSON_AddNumberToObject(result, "weeks", days / 7);
+        cJSON_AddNumberToObject(result, "remaining_days", days % 7);
+    }
+
+    return result;
+}
+
 /* ---- Tool Definition Table ---- */
 
 #define SCHEMA(s) s
@@ -1498,7 +1669,7 @@ static cJSON *tool_decoy_config(mnemon_storage_t *s, const cJSON *params)
 static const mnemon_tool_def_t tool_defs[] = {
     {"store_memory", tool_store_memory,
      "Store a new memory with embedding and optional entity extraction",
-     SCHEMA("{\"type\":\"object\",\"properties\":{\"content\":{\"type\":\"string\",\"description\":\"Text content to store\"},\"source_type\":{\"type\":\"string\"},\"source_id\":{\"type\":\"string\"},\"source_author\":{\"type\":\"string\"},\"tags\":{\"type\":\"array\",\"items\":{\"type\":\"string\"}},\"tier\":{\"type\":\"string\",\"enum\":[\"episodic\",\"semantic\",\"procedural\"]},\"skip_secret_check\":{\"type\":\"boolean\"}},\"required\":[\"content\"]}")},
+     SCHEMA("{\"type\":\"object\",\"properties\":{\"content\":{\"type\":\"string\",\"description\":\"Text content to store\"},\"source_type\":{\"type\":\"string\"},\"source_id\":{\"type\":\"string\"},\"source_author\":{\"type\":\"string\"},\"tags\":{\"type\":\"array\",\"items\":{\"type\":\"string\"}},\"tier\":{\"type\":\"string\",\"enum\":[\"episodic\",\"semantic\",\"procedural\"]},\"skip_secret_check\":{\"type\":\"boolean\"},\"created_at\":{\"type\":\"string\",\"description\":\"ISO8601 timestamp to assign (default: now)\"}},\"required\":[\"content\"]}")},
 
     {"retrieve_memory", tool_retrieve_memory,
      "Retrieve a memory by UUID",
@@ -1566,11 +1737,11 @@ static const mnemon_tool_def_t tool_defs[] = {
 
     {"import_batch", tool_import_batch,
      "Import an array of memories in a single call (max 1000)",
-     SCHEMA("{\"type\":\"object\",\"properties\":{\"memories\":{\"type\":\"array\",\"items\":{\"type\":\"object\",\"properties\":{\"content\":{\"type\":\"string\"},\"source_type\":{\"type\":\"string\"},\"tags\":{\"type\":\"array\",\"items\":{\"type\":\"string\"}},\"tier\":{\"type\":\"string\"}}}}},\"required\":[\"memories\"]}")},
+     SCHEMA("{\"type\":\"object\",\"properties\":{\"memories\":{\"type\":\"array\",\"items\":{\"type\":\"object\",\"properties\":{\"content\":{\"type\":\"string\"},\"source_type\":{\"type\":\"string\"},\"tags\":{\"type\":\"array\",\"items\":{\"type\":\"string\"}},\"tier\":{\"type\":\"string\"},\"created_at\":{\"type\":\"string\",\"description\":\"ISO8601 timestamp\"}}}}},\"required\":[\"memories\"]}")},
 
     {"import_file", tool_import_file,
      "Import memories from a local file (jsonl, csv, mbox, text, markdown)",
-     SCHEMA("{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"},\"format\":{\"type\":\"string\",\"enum\":[\"auto\",\"jsonl\",\"csv\",\"mbox\",\"text\",\"markdown\"]},\"source_type\":{\"type\":\"string\"},\"chunking\":{\"type\":\"string\",\"enum\":[\"paragraph\",\"line\",\"page\",\"none\"]},\"max_chunk_size\":{\"type\":\"integer\"}},\"required\":[\"path\"]}")},
+     SCHEMA("{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"},\"format\":{\"type\":\"string\",\"enum\":[\"auto\",\"jsonl\",\"csv\",\"mbox\",\"text\",\"markdown\"]},\"source_type\":{\"type\":\"string\"},\"chunking\":{\"type\":\"string\",\"enum\":[\"paragraph\",\"line\",\"page\",\"none\"]},\"max_chunk_size\":{\"type\":\"integer\"},\"preserve_timestamps\":{\"type\":\"boolean\",\"description\":\"Use source timestamps (mbox Date header, JSONL created_at field) for created_at\"}},\"required\":[\"path\"]}")},
 
     {"import_directory", tool_import_directory,
      "Import all matching files from a directory",
@@ -1627,6 +1798,18 @@ static const mnemon_tool_def_t tool_defs[] = {
     {"set_system_config", tool_decoy_config,
      "Update runtime configuration values",
      SCHEMA("{\"type\":\"object\",\"properties\":{\"key\":{\"type\":\"string\"},\"value\":{\"type\":\"string\"}},\"required\":[\"key\",\"value\"]}")},
+
+    {"extract_events", tool_extract_events,
+     "Extract dated events from text and create event entities with timestamps. Use for building a timeline from conversation content.",
+     SCHEMA("{\"type\":\"object\",\"properties\":{\"content\":{\"type\":\"string\",\"description\":\"Text to extract events from\"},\"context_year\":{\"type\":\"integer\",\"description\":\"Default year for dates without explicit year\"},\"create_entities\":{\"type\":\"boolean\",\"description\":\"Create event entities in knowledge graph (default true)\"}},\"required\":[\"content\"]}")},
+
+    {"search_events", tool_search_events,
+     "Search for dated events by event date range. Returns events sorted chronologically. Unlike search_temporal (which filters by storage time), this searches by the actual event dates extracted from content.",
+     SCHEMA("{\"type\":\"object\",\"properties\":{\"since\":{\"type\":\"string\",\"description\":\"Start date (ISO8601 or natural like 'January 10')\"},\"until\":{\"type\":\"string\",\"description\":\"End date\"},\"name\":{\"type\":\"string\",\"description\":\"Filter by event name substring\"},\"top_k\":{\"type\":\"integer\"}}}")},
+
+    {"calculate_duration", tool_calculate_duration,
+     "Calculate the number of days between two dates. Accepts ISO8601 or natural language dates like 'January 10' or 'March 15, 2023'. Returns days, days_inclusive (counting both endpoints), and weeks.",
+     SCHEMA("{\"type\":\"object\",\"properties\":{\"from\":{\"type\":\"string\",\"description\":\"Start date\"},\"to\":{\"type\":\"string\",\"description\":\"End date\"},\"context_year\":{\"type\":\"integer\",\"description\":\"Default year for dates without explicit year\"}},\"required\":[\"from\",\"to\"]}")},
 };
 
 #define TOOL_COUNT (sizeof(tool_defs) / sizeof(tool_defs[0]))

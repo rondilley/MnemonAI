@@ -91,6 +91,14 @@ and conventions.
 - `retrieve_memory` -- when you have a specific memory ID from a
   previous search result
 - `store_memory` -- to persist new knowledge
+- `search_events` -- when searching for events by the date they
+  happened (not when they were stored). Use for "what happened in
+  January?" or "events between March and June"
+- `calculate_duration` -- when you need to compute days between two
+  dates. ALWAYS use this instead of calculating dates yourself.
+  Accepts natural language like "January 10" or ISO 8601.
+- `extract_events` -- when ingesting content that mentions dates,
+  call this to create searchable event entities in the knowledge graph
 
 ### Memory tiers
 - **episodic** -- events, conversations, debugging sessions, things that
@@ -157,7 +165,10 @@ Once connected, Claude has access to all of these mnemond operations:
 | `search_keyword` | FTS5 BM25 keyword search | Exact terms, error codes, identifiers |
 | `search_semantic` | Vector similarity search | Conceptual/meaning-based queries |
 | `search_entities` | Search entities by name, type, or observations | Finding known concepts |
-| `search_temporal` | Time-filtered search | "What happened last week?" |
+| `search_temporal` | Time-filtered by storage date | "What was stored last week?" |
+| `search_events` | Search by actual event date | "What happened in January?" |
+| `calculate_duration` | Days between two dates | "How many days between X and Y?" |
+| `extract_events` | Parse dates from text, create event entities | After ingesting content with dates |
 
 ### Store and Retrieve
 

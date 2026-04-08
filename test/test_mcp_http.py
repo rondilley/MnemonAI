@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-MCP HTTP Transport Test -- Tests all 28 tools over Streamable HTTP.
+MCP HTTP Transport Test -- Tests all 35 tools over Streamable HTTP.
 
 Starts mnemond in foreground mode with HTTP enabled, then exercises
 every tool via HTTP POST to /mcp, validating MCP spec compliance.
@@ -101,7 +101,7 @@ def main():
     )
     time.sleep(1)  # wait for HTTP server to start
 
-    print("=== MCP HTTP Transport Test (All 28 Tools) ===\n")
+    print("=== MCP HTTP Transport Test (All 35 Tools) ===\n")
 
     # ---- Lifecycle ----
     print("  --- Lifecycle ---")
@@ -137,9 +137,9 @@ def main():
         "jsonrpc": "2.0", "id": 2, "method": "tools/list"
     })
     tools = resp.get("result", {}).get("tools", []) if resp else []
-    test("[HTTP] tools/list returns 28+ tools", len(tools) >= 28, f"got {len(tools)}")
+    test("[HTTP] tools/list returns 35+ tools", len(tools) >= 28, f"got {len(tools)}")
 
-    # ---- All 28 tools ----
+    # ---- All 35 tools ----
     print("\n  --- Tools over HTTP ---")
 
     # store_memory

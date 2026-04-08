@@ -86,6 +86,9 @@ Use the `mnemond` MCP tools to preserve durable context across sessions and avoi
 - `mcp__mnemond__get_entity_graph`: use for relationships
 - `mcp__mnemond__retrieve_memory`: use for a specific memory ID
 - `mcp__mnemond__store_memory`: use to persist new knowledge
+- `mcp__mnemond__search_events`: search by event dates in content (not storage time)
+- `mcp__mnemond__calculate_duration`: compute days between two dates (always use this instead of calculating yourself)
+- `mcp__mnemond__extract_events`: parse dates from text and create event entities
 
 ### Memory tiers
 - `episodic`: events, debugging sessions, task progress
@@ -163,6 +166,9 @@ Use the `mnemond` MCP tools to preserve durable context across sessions and avoi
 - `mcp__mnemond__get_entity_graph`: use for relationships
 - `mcp__mnemond__retrieve_memory`: use for a specific memory ID
 - `mcp__mnemond__store_memory`: use to persist new knowledge
+- `mcp__mnemond__search_events`: search by event dates in content (not storage time)
+- `mcp__mnemond__calculate_duration`: compute days between two dates (always use this instead of calculating yourself)
+- `mcp__mnemond__extract_events`: parse dates from text and create event entities
 
 ### Memory tiers
 - `episodic`: events, debugging sessions, task progress

@@ -14,7 +14,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <ctype.h>
+#include <time.h>
 #include <sys/stat.h>
 
 #ifdef HAVE_UNISTD_H
@@ -55,9 +57,12 @@ static char *read_file(const char *path, size_t *out_len)
     return buf;
 }
 
-/* Store a single chunk as a memory */
+/* Store a single chunk as a memory.
+ * created_at_ms: if > 0, use as the created_at timestamp;
+ *                if 0, use current wall-clock time. */
 static int store_chunk(mnemon_storage_t *s, const char *content,
-                       const mnemon_import_opts_t *opts)
+                       const mnemon_import_opts_t *opts,
+                       int64_t created_at_ms)
 {
     mnemon_memory_t mem;
     memset(&mem, 0, sizeof(mem));
@@ -71,7 +76,7 @@ static int store_chunk(mnemon_storage_t *s, const char *content,
     mem.source_id = strdup("");
     mem.tier = MNEMON_TIER_EPISODIC;
     mem.importance = 0.5f;
-    mem.created_at = mnemon_time_ms();
+    mem.created_at = (created_at_ms > 0) ? created_at_ms : mnemon_time_ms();
     mem.last_accessed = mem.created_at;
 
     /* Tags */
@@ -205,7 +210,13 @@ static mnemon_err_t parse_jsonl(mnemon_storage_t *s, const char *data,
             if (obj) {
                 const cJSON *content = cJSON_GetObjectItemCaseSensitive(obj, "content");
                 if (cJSON_IsString(content)) {
-                    if (store_chunk(s, content->valuestring, opts) == 0)
+                    int64_t ts = 0;
+                    if (opts->preserve_timestamps) {
+                        const cJSON *ca = cJSON_GetObjectItemCaseSensitive(obj, "created_at");
+                        if (cJSON_IsString(ca))
+                            ts = mnemon_parse_iso8601(ca->valuestring);
+                    }
+                    if (store_chunk(s, content->valuestring, opts, ts) == 0)
                         result->imported++;
                     else
                         result->errors++;
@@ -242,7 +253,7 @@ static mnemon_err_t parse_csv(mnemon_storage_t *s, const char *data,
 
         if (line_len > 0) {
             char *line = strndup(p, line_len);
-            if (store_chunk(s, line, opts) == 0)
+            if (store_chunk(s, line, opts, 0) == 0)
                 result->imported++;
             else
                 result->errors++;
@@ -253,6 +264,65 @@ static mnemon_err_t parse_csv(mnemon_storage_t *s, const char *data,
     }
 
     return MNEMON_OK;
+}
+
+/* Parse RFC 2822 Date: header into milliseconds since epoch.
+ * Handles common formats like "Tue, 15 Jan 2025 14:30:00 +0000".
+ * Returns 0 on failure. */
+static int64_t parse_rfc2822_date(const char *str)
+{
+    if (!str) return 0;
+
+    /* Skip optional day-of-week */
+    const char *p = strchr(str, ',');
+    if (p) p++;
+    else   p = str;
+    while (*p == ' ') p++;
+
+    static const char *months[] = {
+        "Jan","Feb","Mar","Apr","May","Jun",
+        "Jul","Aug","Sep","Oct","Nov","Dec"
+    };
+
+    int day = 0, year = 0, hour = 0, min = 0, sec = 0;
+    char mon_str[4] = {0};
+
+    if (sscanf(p, "%d %3s %d %d:%d:%d", &day, mon_str, &year, &hour, &min, &sec) < 5)
+        return 0;
+
+    int mon = -1;
+    for (int i = 0; i < 12; i++) {
+        if (strncasecmp(mon_str, months[i], 3) == 0) { mon = i; break; }
+    }
+    if (mon < 0) return 0;
+
+    /* 2-digit year handling */
+    if (year < 100) year += (year < 50) ? 2000 : 1900;
+
+    struct tm tm;
+    memset(&tm, 0, sizeof(tm));
+    tm.tm_mday = day;
+    tm.tm_mon  = mon;
+    tm.tm_year = year - 1900;
+    tm.tm_hour = hour;
+    tm.tm_min  = min;
+    tm.tm_sec  = sec;
+
+    /* Parse timezone offset (e.g., +0000, -0500) */
+    const char *tz = p;
+    int tz_offset = 0;
+    while (*tz && *tz != '+' && *tz != '-') tz++;
+    if (*tz == '+' || *tz == '-') {
+        int tz_val = 0;
+        if (sscanf(tz + 1, "%4d", &tz_val) == 1) {
+            tz_offset = (tz_val / 100) * 3600 + (tz_val % 100) * 60;
+            if (*tz == '-') tz_offset = -tz_offset;
+        }
+    }
+
+    time_t t = timegm(&tm);
+    if (t == (time_t)-1) return 0;
+    return ((int64_t)t - tz_offset) * 1000;
 }
 
 static mnemon_err_t parse_mbox(mnemon_storage_t *s, const char *data,
@@ -275,7 +345,8 @@ static mnemon_err_t parse_mbox(mnemon_storage_t *s, const char *data,
         if (!nl) break;
         p = nl + 1;
 
-        /* Find body (after blank line) */
+        /* Parse headers -- extract Date: if preserve_timestamps is set */
+        int64_t msg_timestamp = 0;
         const char *body = NULL;
         while (p < end) {
             nl = memchr(p, '\n', (size_t)(end - p));
@@ -283,6 +354,23 @@ static mnemon_err_t parse_mbox(mnemon_storage_t *s, const char *data,
             if (nl == p || (nl == p + 1 && *p == '\r')) {
                 body = nl + 1;
                 break;
+            }
+            /* Extract Date: header */
+            if (opts->preserve_timestamps &&
+                (size_t)(nl - p) > 6 &&
+                strncasecmp(p, "Date:", 5) == 0) {
+                const char *val = p + 5;
+                while (*val == ' ' && val < nl) val++;
+                size_t vlen = (size_t)(nl - val);
+                if (vlen > 0 && vlen < 256) {
+                    char datebuf[256];
+                    memcpy(datebuf, val, vlen);
+                    datebuf[vlen] = '\0';
+                    /* Strip trailing \r */
+                    if (vlen > 0 && datebuf[vlen - 1] == '\r')
+                        datebuf[vlen - 1] = '\0';
+                    msg_timestamp = parse_rfc2822_date(datebuf);
+                }
             }
             p = nl + 1;
         }
@@ -305,7 +393,7 @@ static mnemon_err_t parse_mbox(mnemon_storage_t *s, const char *data,
         size_t body_len = (size_t)(msg_end - body);
         if (body_len > 0) {
             char *content = strndup(body, body_len);
-            if (store_chunk(s, content, opts) == 0)
+            if (store_chunk(s, content, opts, msg_timestamp) == 0)
                 result->imported++;
             else
                 result->errors++;
@@ -335,7 +423,7 @@ static mnemon_err_t parse_text(mnemon_storage_t *s, const char *data,
         while (*c && isspace((unsigned char)*c)) c++;
         if (*c == '\0') { result->skipped++; continue; }
 
-        if (store_chunk(s, chunks.chunks[i], opts) == 0)
+        if (store_chunk(s, chunks.chunks[i], opts, 0) == 0)
             result->imported++;
         else
             result->errors++;

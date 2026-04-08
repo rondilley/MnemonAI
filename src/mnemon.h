@@ -69,6 +69,7 @@ typedef struct mnemon_entity {
     float      *embedding;
     int64_t     created_at;
     int64_t     updated_at;
+    int64_t     event_date;      /* 0 = not a dated event; ms since epoch */
     float       importance;
     uint32_t    access_count;
     int64_t     last_accessed;

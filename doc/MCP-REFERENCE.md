@@ -259,7 +259,7 @@ No response is returned. This is a JSON-RPC notification (no `id` field).
 {"jsonrpc": "2.0", "id": 2, "method": "tools/list"}
 ```
 
-Returns all 32 registered tools with their names, descriptions, and input schemas. Useful for dynamic tool discovery, but not required if you already know the tool names.
+Returns all 35 registered tools with their names, descriptions, and input schemas. Useful for dynamic tool discovery, but not required if you already know the tool names.
 
 ### Step 4: Call tools
 
@@ -299,6 +299,7 @@ Store a new memory. Content is indexed for full-text search, embedded for vector
 | `tags` | array of strings | no | `[]` | Categorization tags. Max 1000 tags. |
 | `tier` | string | no | `"episodic"` | Memory tier: `"episodic"`, `"semantic"`, or `"procedural"`. |
 | `skip_secret_check` | boolean | no | `false` | Bypass secret detection (use with caution). |
+| `created_at` | string | no | now | ISO 8601 timestamp to assign. Use for backdating imported historical data. |
 
 **Request:**
 
@@ -895,6 +896,74 @@ Get a feed of entities that changed since a given time. Useful for incremental s
 
 ---
 
+### Temporal Event Tools
+
+Tools for extracting, searching, and computing durations between dated events found in memory content. Unlike `search_temporal` (which filters by storage time), these tools work with **event dates mentioned in the text** (e.g., "the workshop on January 10th").
+
+#### extract_events
+
+Parse natural language dates from text and create event entities in the knowledge graph. Handles formats like "January 10th", "March 15, 2023", "Feb 27".
+
+**Arguments:**
+
+| Parameter | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| `content` | string | yes | | Text to extract events from. |
+| `context_year` | integer | no | 2023 | Default year for dates without an explicit year. |
+| `create_entities` | boolean | no | `true` | Create event entities in the knowledge graph. |
+
+**Response fields:** `events` (array of `{description, event_date, entity_id}`), `extracted` (count), `entities_created` (count).
+
+#### search_events
+
+Search for event entities by their actual event date (not storage time). Returns results sorted chronologically.
+
+**Arguments:**
+
+| Parameter | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| `since` | string | no | | Start date (ISO 8601 or natural language like "January 10"). |
+| `until` | string | no | | End date. |
+| `name` | string | no | | Filter by event name substring. |
+| `top_k` | integer | no | 20 | Max results. |
+
+**Response:** Standard result set with event entities sorted by `event_date` ascending.
+
+#### calculate_duration
+
+Compute the number of days between two dates. Accepts ISO 8601 or natural language dates. Eliminates the need for LLM date arithmetic.
+
+**Arguments:**
+
+| Parameter | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| `from` | string | yes | | Start date (ISO 8601 or natural language). |
+| `to` | string | yes | | End date. |
+| `context_year` | integer | no | 2023 | Default year for dates without an explicit year. |
+
+**Response fields:** `days`, `days_inclusive` (counting both endpoints), `from` (parsed ISO 8601), `to` (parsed ISO 8601), `from_is_earlier` (boolean), `weeks` and `remaining_days` (if >= 7 days).
+
+**Example:**
+
+```json
+{
+  "jsonrpc": "2.0", "id": 50,
+  "method": "tools/call",
+  "params": {
+    "name": "calculate_duration",
+    "arguments": {
+      "from": "January 10",
+      "to": "January 17",
+      "context_year": 2023
+    }
+  }
+}
+```
+
+Response: `{"days": 7, "days_inclusive": 8, "from": "2023-01-10T12:00:00.000Z", "to": "2023-01-17T12:00:00.000Z", "from_is_earlier": true, "weeks": 1, "remaining_days": 0}`
+
+---
+
 ### Import
 
 Bulk import tools for loading existing data.
@@ -917,6 +986,7 @@ Each memory object:
 | `source_type` | string | no | `"mcp"` | Origin label. |
 | `tags` | array of strings | no | `[]` | Tags. |
 | `tier` | string | no | `"episodic"` | Memory tier. |
+| `created_at` | string | no | now | ISO 8601 timestamp. For backdating imported data. |
 
 **Request:**
 
@@ -961,6 +1031,7 @@ Import memories from a local file. Supports JSONL, CSV, mbox, plain text, and ma
 | `source_type` | string | no | `"import"` | Origin label for imported memories. |
 | `chunking` | string | no | `"paragraph"` | `"paragraph"`, `"line"`, `"page"`, `"none"`. |
 | `max_chunk_size` | integer | no | 4096 | Max bytes per chunk. |
+| `preserve_timestamps` | boolean | no | `false` | Use source timestamps for `created_at`. Mbox: extracts `Date:` header. JSONL: uses `created_at` field. |
 
 **Request:**
 
@@ -1517,7 +1588,7 @@ Always check `isError` before parsing the `text` field as a successful result.
 
 ---
 
-## All 32 Tools at a Glance
+## All 35 Tools at a Glance
 
 | # | Tool | Category | Description |
 |---|------|----------|-------------|
@@ -1553,3 +1624,6 @@ Always check `isError` before parsing the `text` field as a successful result.
 | 30 | `export_all_memories` | Admin | Export memory database (requires admin) |
 | 31 | `debug_raw_query` | Admin | Raw database query (requires debug mode) |
 | 32 | `set_system_config` | Admin | Update runtime config (requires admin) |
+| 33 | `extract_events` | Temporal Events | Parse dates from text, create event entities |
+| 34 | `search_events` | Temporal Events | Search entities by event date range |
+| 35 | `calculate_duration` | Temporal Events | Compute days between two dates |

@@ -46,6 +46,15 @@ Always do at session start:
 - Architectural decisions: Document the "why" behind changes.
 - Significant errors: Log root causes and resolutions.
 - Project-specific terminology and acronyms.
+
+## Tool Selection
+- `mcp_remote-service_search_hybrid`: Default search (keyword + vector + graph fusion)
+- `mcp_remote-service_search_keyword`: Exact term matching
+- `mcp_remote-service_search_semantic`: Meaning-based queries
+- `mcp_remote-service_search_events`: Search by event dates mentioned in content
+- `mcp_remote-service_calculate_duration`: Compute days between two dates (always use this instead of calculating yourself)
+- `mcp_remote-service_search_entities`: Look up entities in the knowledge graph
+- `mcp_remote-service_store_memory`: Persist new knowledge
 ```
 
 ## 3. Verify the Integration

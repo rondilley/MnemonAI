@@ -321,7 +321,7 @@ For now, Claude Code and Claude Desktop with HTTP are the most frictionless path
 
 ## 6. Making Claude Actually Use Memory
 
-Wiring up the MCP server gives Claude *access* to memory tools. It does not give Claude *behavior* around when and how to use them. The model discovers the 32 tools via the MCP handshake, but without explicit guidance, it won't proactively store or retrieve memories.
+Wiring up the MCP server gives Claude *access* to memory tools. It does not give Claude *behavior* around when and how to use them. The model discovers the 35 tools via the MCP handshake, but without explicit guidance, it won't proactively store or retrieve memories.
 
 ### The CLAUDE.md Memory Protocol
 
@@ -478,7 +478,7 @@ Expected: `{"status": "ok", "version": "v0.4.0", "storage_ok": true}`
 
 **Tool discovery (from Claude Code):**
 
-Ask Claude to "list all available mnemond tools." It should report 32 tools.
+Ask Claude to "list all available mnemond tools." It should report 35 tools.
 
 **Store and retrieve round-trip:**
 
@@ -487,6 +487,10 @@ Ask Claude to "store a test memory with content 'integration test' and tag 'test
 **Embedding verification:**
 
 Ask Claude to "run a vector_search for 'integration test'." If embeddings are working (model loaded), this should return results ranked by semantic similarity. If embeddings are disabled, vector_search will return an appropriate error.
+
+**Temporal event tools:**
+
+Ask Claude to "use extract_events to find dates in 'I attended the workshop on January 10th and the meeting was January 17th', then calculate_duration between those two dates." Expected: 7 days.
 
 ---
 

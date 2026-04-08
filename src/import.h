@@ -28,6 +28,7 @@ typedef struct {
     const char  *chunking;       /* "paragraph", "line", "page", "none" */
     int          max_chunk_size;
     bool         extract_entities;
+    bool         preserve_timestamps; /* Use source timestamps for created_at */
 } mnemon_import_opts_t;
 
 mnemon_err_t mnemon_import_file(mnemon_storage_t *s, const char *path,

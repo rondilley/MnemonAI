@@ -260,9 +260,9 @@ static uint64_t fnv1a_64(const char *s)
 
 static void pack_entity(mpk_t *m, const mnemon_entity_t *e)
 {
-    uint32_t nfields = 11;
+    uint32_t nfields = 12;
     mpk_map(m, nfields);
-    mpk_str(m, "v");    mpk_uint32(m, 1);
+    mpk_str(m, "v");    mpk_uint32(m, 2);  /* v2: added event_date */
     mpk_str(m, "id");   mpk_bin(m, e->id, 16);
     mpk_str(m, "name"); mpk_str(m, e->name);
     mpk_str(m, "type"); mpk_str(m, e->entity_type);
@@ -278,6 +278,7 @@ static void pack_entity(mpk_t *m, const mnemon_entity_t *e)
     }
     mpk_str(m, "cat"); mpk_int64(m, e->created_at);
     mpk_str(m, "uat"); mpk_int64(m, e->updated_at);
+    mpk_str(m, "edt"); mpk_int64(m, e->event_date);
     mpk_str(m, "imp"); mpk_float(m, e->importance);
     mpk_str(m, "acc"); mpk_uint32(m, e->access_count);
     mpk_str(m, "lac"); mpk_int64(m, e->last_accessed);
@@ -315,6 +316,7 @@ static void unpack_entity(mpr_t *r, mnemon_entity_t *e)
         }
         else if (strcmp(key, "cat") == 0) { e->created_at = mpr_int64(r); }
         else if (strcmp(key, "uat") == 0) { e->updated_at = mpr_int64(r); }
+        else if (strcmp(key, "edt") == 0) { e->event_date = mpr_int64(r); }
         else if (strcmp(key, "imp") == 0) { e->importance = mpr_float(r); }
         else if (strcmp(key, "acc") == 0) { e->access_count = mpr_uint32(r); }
         else if (strcmp(key, "lac") == 0) { e->last_accessed = mpr_int64(r); }

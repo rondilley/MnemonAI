@@ -768,7 +768,7 @@ Both use the same dimensions (768), metric (cosine), and ID mapping scheme. The 
 
 Tools are registered in `mcp_dispatch.c` with their JSON Schema input definitions. The `tools/list` MCP method returns the full registry.
 
-### 6.3 Tool Definitions (32 tools)
+### 6.3 Tool Definitions (35 tools)
 
 #### 6.3.1 Memory CRUD (4 tools)
 
@@ -999,6 +999,16 @@ Returns: `{jobs: [{id, status: "running"|"complete"|"failed", files_total, files
 Returns: `{memories: [{id, content_preview, source_type, source_id, source_author, source_timestamp, tags[], tier, importance, created_at}], total_count, truncated}`
 
 Behavior: Paginated listing of memories with filtering. Unlike `search_*` tools which rank by relevance, this is a structured browse/filter interface. Ordered by `source_timestamp` descending (most recent first). Content is truncated to 200 characters in `content_preview`.
+
+#### 6.3.8 Temporal Event Tools (3 tools)
+
+These tools work with **event dates mentioned in text content** (e.g., "the workshop on January 10th"), as opposed to `search_temporal` which filters by storage timestamps. Added to address LongMemEval temporal reasoning gaps.
+
+**`extract_events`** -- Parses natural language dates from text using a regex-based date parser in `temporal.c`. Creates event entities in the knowledge graph with the `event_date` field set. Handles formats: "January 10th", "March 15, 2023", "Feb 27". Returns extracted events with ISO 8601 timestamps.
+
+**`search_events`** -- Queries entities by `event_date` range. Returns results sorted chronologically (ascending). Accepts ISO 8601 or natural language dates. Supports name substring filtering. Unlike `search_temporal` (which scans memories by `created_at`), this scans entities by `event_date`.
+
+**`calculate_duration`** -- Deterministic date arithmetic. Given two dates (ISO 8601 or natural language), returns `days`, `days_inclusive`, `weeks`, `remaining_days`, and `from_is_earlier`. Eliminates LLM date math errors for temporal reasoning questions. The `context_year` parameter provides a default year for dates without explicit years.
 
 ### 6.4 Context Budget Enforcement
 
@@ -1928,7 +1938,7 @@ No other memory MCP server has any hardware awareness. mnemon_ai is the only one
 | **Language** | Rust | Python | Python | Python | **C** |
 | **Key Innovation** | Hebbian associative memory | Zettelkasten notes | Engram lifecycle | Memory as OS resource | **All combined** |
 | **Hardware Aware** | No | No | No | No | **Yes** |
-| **MCP Support** | Yes (37 tools) | No | No | No | **Yes (32 tools)** |
+| **MCP Support** | Yes (37 tools) | No | No | No | **Yes (35 tools)** |
 | **Bulk Import** | No | No | No | No | **Yes** |
 | **Production Ready** | Early | Research | Research | Research | **Phase 1 target** |
 
@@ -2023,12 +2033,12 @@ Phase 1 is fully implemented. This section documents deviations from the archite
 | test_fts | 11 | Index, search, remove, update memory, update entity, sanitization, checkpoint, clear, empty/special query |
 | test_vector | 7 | Add/remove/search, entity isolation, save/load persistence, empty search, rwlock |
 | test_search | 6 | Keyword, hybrid RRF, no results, top_k cap, empty query, UUID validity |
-| test_mcp | 42 | All 32 tools + MCP lifecycle + tools/list schema + 3 error codes + isError + secret rejection + content size cap |
+| test_mcp | 42 | All 35 tools + MCP lifecycle + tools/list schema + 3 error codes + isError + secret rejection + content size cap |
 | test_temporal | 24 | ISO 8601, decay math, UUID ops, importance update, prune, **admit control**, **audit log**, **model manager** |
 | test_secret | 33 | All 7 pattern types, false positives, edge cases, entropy |
 | test_storage | 24 | Full-field round-trip, 10KB content, unicode, tags, bulk 50, delete+FTS, **delete entity**, **edges_to**, **rebuild indexes**, **replay intents**, **storage accessors** |
-| test_mcp_client.py | 105 | All 32 tools end-to-end over stdio, MCP spec conformance, schema validation |
-| test_mcp_http.py | 42 | All 32 tools over HTTP, auth, sessions, CORS |
+| test_mcp_client.py | 105 | All 35 tools end-to-end over stdio, MCP spec conformance, schema validation |
+| test_mcp_http.py | 42 | All 35 tools over HTTP, auth, sessions, CORS |
 | test_mcp_perf.py | -- | Latency/throughput at 100/1000 memory scale |
 | **Total** | **343** | |
 
@@ -2043,10 +2053,29 @@ Phase 1 is fully implemented. This section documents deviations from the archite
 | keyword search p50 | 120us | 530us |
 | stats query | 20us | 30us |
 
-### 18.5 Security Audit (2026-04-04)
+### 18.5 LongMemEval Benchmark (2026-04-08)
+
+Real-world retrieval evaluation using the LongMemEval dataset (Wu et al., ICLR 2025). 500 questions, 7 question types, 5 memory abilities. Full results in `doc/BENCHMARK-REPORT.md`.
+
+| Variant | Corpus | R@5 | Search Latency | Notes |
+|---------|--------|-----|----------------|-------|
+| Oracle | 1-3 sessions | **100%** | <1ms | No distractors |
+| S | 19,062 sessions | **27.6%** | 90ms p50 | Realistic, with GPU embeddings |
+
+Key findings:
+- **Retrieval engine is correct**: 100% on oracle (no distractors)
+- **Ranking under load needs work**: 27.6% with 19K sessions vs MemPalace's 96.6%
+- **User-turn retrieval is weak**: 11.4% R@5 (generic language), vs 87.5% for assistant turns
+- **Embedding context limit**: nomic-embed's 2048 token window truncates ~30% of sessions
+
+Bugs found: embedding `n_ubatch` assertion crash, secret detection URL false positives, stderr pipe deadlock at scale. All fixed.
+
+New tools added for temporal reasoning: `extract_events`, `search_events`, `calculate_duration`.
+
+### 18.6 Security Audit (2026-04-04)
 
 8 vulnerabilities found and fixed. See CLAUDE.md for the full table.
 
 ---
 
-*End of architecture document. v0.4 -- all phases complete, all gaps closed.*
+*End of architecture document. v0.4 -- all phases complete. Primary improvement area: retrieval ranking quality at scale (see BENCHMARK-REPORT.md).*

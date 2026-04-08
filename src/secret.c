@@ -236,7 +236,9 @@ mnemon_err_t mnemon_secret_scan(const char *data, size_t len,
         }
     }
 
-    /* High-entropy detection: check words > 32 chars */
+    /* High-entropy detection: check words > 32 chars.
+     * Skip URLs (http:// or https://) -- URLs are resource locators,
+     * not secrets, and commonly appear in conversation content. */
     i = 0;
     while (i < len) {
         while (i < len && isspace((unsigned char)data[i])) i++;
@@ -244,9 +246,22 @@ mnemon_err_t mnemon_secret_scan(const char *data, size_t len,
         while (i < len && !isspace((unsigned char)data[i])) i++;
         size_t wlen = i - start;
         if (wlen > 32) {
-            float ent = mnemon_entropy(data + start, wlen);
-            if (ent > 4.5f)
-                add_match(result, MNEMON_SECRET_HIGH_ENTROPY, start, wlen);
+            /* Skip URLs and markdown links containing URLs.
+             * Check if http:// or https:// appears anywhere in the word,
+             * not just at the start (handles [text](https://...) links). */
+            bool is_url = false;
+            for (size_t u = start; u + 8 <= start + wlen; u++) {
+                if (strncmp(data + u, "http://", 7) == 0 ||
+                    strncmp(data + u, "https://", 8) == 0) {
+                    is_url = true;
+                    break;
+                }
+            }
+            if (!is_url) {
+                float ent = mnemon_entropy(data + start, wlen);
+                if (ent > 4.5f)
+                    add_match(result, MNEMON_SECRET_HIGH_ENTROPY, start, wlen);
+            }
         }
     }
 
