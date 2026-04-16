@@ -283,11 +283,26 @@ static bool check_origin(mnemon_http_t *h, struct MHD_Connection *conn)
 
 /* ---- HTTP error responses ---- */
 
+/* Map HTTP status to JSON-RPC error code */
+static int http_to_jsonrpc_code(unsigned int status)
+{
+    switch (status) {
+    case MHD_HTTP_BAD_REQUEST:        return -32600; /* Invalid Request */
+    case MHD_HTTP_NOT_FOUND:          return -32601; /* Method not found */
+    case MHD_HTTP_METHOD_NOT_ALLOWED: return -32601;
+    case MHD_HTTP_CONTENT_TOO_LARGE:  return -32600;
+    default:                          return -32000; /* Server error */
+    }
+}
+
 static enum MHD_Result respond_error(struct MHD_Connection *conn,
                                       unsigned int status, const char *msg)
 {
-    char body[256];
-    snprintf(body, sizeof(body), "{\"error\":\"%s\"}", msg);
+    char body[512];
+    snprintf(body, sizeof(body),
+             "{\"jsonrpc\":\"2.0\",\"id\":null,"
+             "\"error\":{\"code\":%d,\"message\":\"%s\"}}",
+             http_to_jsonrpc_code(status), msg);
     struct MHD_Response *resp = MHD_create_response_from_buffer(
         strlen(body), body, MHD_RESPMEM_MUST_COPY);
     MHD_add_response_header(resp, "Content-Type", "application/json");

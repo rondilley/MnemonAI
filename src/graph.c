@@ -34,6 +34,7 @@ struct mnemon_graph {
     MDB_dbi  dbi_edges;
     MDB_dbi  dbi_edges_rev;
     MDB_dbi  dbi_memories;
+    MDB_dbi  dbi_chunks;
     MDB_dbi  dbi_temporal;
     MDB_dbi  dbi_intents;
     MDB_dbi  dbi_meta;
@@ -468,7 +469,7 @@ mnemon_err_t mnemon_graph_open(mnemon_graph_t **out, const char *path,
     rc = mdb_env_create(&g->env);
     if (rc) goto fail_lmdb;
 
-    mdb_env_set_maxdbs(g->env, 7);
+    mdb_env_set_maxdbs(g->env, 8);
     mdb_env_set_mapsize(g->env, (size_t)map_size_gb * 1073741824ULL);
     mdb_env_set_maxreaders(g->env, max_readers);
 
@@ -483,6 +484,7 @@ mnemon_err_t mnemon_graph_open(mnemon_graph_t **out, const char *path,
     mdb_dbi_open(txn, "edges", MDB_CREATE | MDB_DUPSORT, &g->dbi_edges);
     mdb_dbi_open(txn, "edges_rev", MDB_CREATE | MDB_DUPSORT, &g->dbi_edges_rev);
     mdb_dbi_open(txn, "memories", MDB_CREATE, &g->dbi_memories);
+    mdb_dbi_open(txn, "chunks", MDB_CREATE, &g->dbi_chunks);
     mdb_dbi_open(txn, "temporal", MDB_CREATE | MDB_DUPSORT, &g->dbi_temporal);
     mdb_dbi_open(txn, "intents", MDB_CREATE, &g->dbi_intents);
     mdb_dbi_open(txn, "meta", MDB_CREATE, &g->dbi_meta);
@@ -522,6 +524,60 @@ void mnemon_graph_close(mnemon_graph_t *g)
 }
 
 MDB_env *mnemon_graph_env(mnemon_graph_t *g) { return g ? g->env : NULL; }
+
+/* ------------------------------------------------------------------ */
+/* Chunk metadata                                                      */
+/* ------------------------------------------------------------------ */
+
+/* Chunk record format: 16 bytes parent_id + 4 bytes seq + 4 bytes offset + 4 bytes length = 28 bytes */
+
+mnemon_err_t mnemon_graph_put_chunk(mnemon_graph_t *g, MDB_txn *txn,
+                                    const mnemon_chunk_meta_t *c)
+{
+    if (!g || !txn || !c) return MNEMON_ERR_INVALID_INPUT;
+
+    uint8_t val[28];
+    memcpy(val, c->parent_id, 16);
+    uint32_t seq = c->sequence;
+    uint32_t off = c->byte_offset;
+    uint32_t len = c->byte_length;
+    memcpy(val + 16, &seq, 4);
+    memcpy(val + 20, &off, 4);
+    memcpy(val + 24, &len, 4);
+
+    MDB_val k = {16, CONST_CAST(c->id)};
+    MDB_val v = {28, val};
+    int rc = mdb_put(txn, g->dbi_chunks, &k, &v, 0);
+    if (rc) {
+        mnemon_err_set(MNEMON_ERR_LMDB, rc, "%s", mdb_strerror(rc));
+        return MNEMON_ERR_LMDB;
+    }
+    return MNEMON_OK;
+}
+
+mnemon_err_t mnemon_graph_get_chunk(mnemon_graph_t *g, MDB_txn *txn,
+                                    const uint8_t chunk_id[16],
+                                    mnemon_chunk_meta_t *out)
+{
+    if (!g || !txn || !chunk_id || !out) return MNEMON_ERR_INVALID_INPUT;
+
+    MDB_val k = {16, CONST_CAST(chunk_id)};
+    MDB_val v;
+    int rc = mdb_get(txn, g->dbi_chunks, &k, &v);
+    if (rc == MDB_NOTFOUND) return MNEMON_ERR_NOT_FOUND;
+    if (rc) {
+        mnemon_err_set(MNEMON_ERR_LMDB, rc, "%s", mdb_strerror(rc));
+        return MNEMON_ERR_LMDB;
+    }
+    if (v.mv_size < 28) return MNEMON_ERR_NOT_FOUND;
+
+    memcpy(out->id, chunk_id, 16);
+    memcpy(out->parent_id, v.mv_data, 16);
+    memcpy(&out->sequence, (uint8_t *)v.mv_data + 16, 4);
+    memcpy(&out->byte_offset, (uint8_t *)v.mv_data + 20, 4);
+    memcpy(&out->byte_length, (uint8_t *)v.mv_data + 24, 4);
+    return MNEMON_OK;
+}
 
 mnemon_err_t mnemon_graph_txn_begin(mnemon_graph_t *g, unsigned int flags, MDB_txn **txn)
 {

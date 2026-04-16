@@ -237,8 +237,8 @@ def main():
     r, ie = call_tool(proc, "get_entity_graph", {
         "entity_id": entity_a, "depth": 2
     }, 65)
-    test("[TOOL] get_entity_graph: entity + edges_out + related",
-         "entity" in r and "edges_out" in r and "related_entities" in r)
+    test("[TOOL] get_entity_graph: BFS nodes + edges with depth",
+         "nodes" in r and "edges" in r and r.get("depth") == 2)
 
     # ---- 6. Temporal ----
     print("\n  --- Temporal ---")

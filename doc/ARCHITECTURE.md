@@ -165,6 +165,12 @@ model = ""
 - In-process embedding eliminates HTTP overhead on the most latency-sensitive path. Every `store_memory` and `search_semantic` call needs embeddings.
 - At ~150MB, the embedding model coexists easily with entity extraction on a 24GB GPU. On CPU with AVX2, throughput is ~100-200 embeddings/sec -- adequate for a memory server.
 
+**Task prefixes:** nomic-embed-text-v1.5 was trained with asymmetric task prefixes. All document embeddings are prefixed with `search_document: ` and all query embeddings with `search_query: `. This significantly improves retrieval quality for short-query-long-document scenarios.
+
+**Context overflow handling:** When text exceeds the model's 2048-token context window, bookend truncation is applied: the first half and last half of available tokens are kept, ensuring both the opening and closing content of long texts contribute to the embedding. This is preferable to silent front-truncation (the default llama_tokenize behavior for BERT models).
+
+**Chunked indexing:** Long memories (>800 bytes) are automatically split into ~800-byte chunks at conversation turn boundaries (`User:`/`Assistant:` prefixes). Each chunk receives its own UUIDv7, embedding, and vector index entry. Chunk metadata (parent_memory_id, byte offset, byte length) is stored in a dedicated LMDB `chunks` database. The vector ranker resolves chunk UUIDs to parent memory UUIDs during search, keeping the best-scoring chunk per parent for fusion. Short memories are not chunked.
+
 **Model management:** The daemon reads the model from a configured path (default: `$XDG_DATA_HOME/mnemond/models/nomic-embed-text-v1.5.Q8_0.gguf`). If the file does not exist, embedding-dependent tools return an error with instructions. The daemon auto-downloads if libcurl is available.
 
 **Model integrity:** An optional `model_sha256` config field allows verifying the GGUF file at load time. If set and the hash mismatches, the daemon refuses to start. This prevents loading a tampered or corrupted model file.
@@ -873,7 +879,7 @@ Returns: Ranked entity list via hybrid search over entity names + observations.
 
 **`get_entity_graph`**
 Parameters: `entity_id` (string), `depth` (int, default 2, max 5)
-Returns: `{entity, edges_out[], edges_in[], related_entities[]}`. BFS traversal, capped at 100 total nodes.
+Returns: `{depth, nodes[], edges[]}`. BFS traversal from root entity to requested depth. Each node includes its `depth` from root. Capped at 200 nodes and 500 edges.
 
 #### 6.3.4 Temporal (3 tools)
 
@@ -1011,7 +1017,7 @@ These tools work with **event dates mentioned in text content** (e.g., "the work
 
 Per OWASP MCP03 (Tool Poisoning / Excessive Context):
 - All search tools enforce `top_k` with hard maximum of 50
-- `get_entity_graph` caps at depth=5, total nodes=100
+- `get_entity_graph` caps at depth=5, 200 nodes, 500 edges
 - All list responses include `truncated: bool`
 - `content` fields in results are truncated to `max_memory_size_kb` config value
 - Total response size is capped (configurable, default 128KB)
@@ -1063,9 +1069,9 @@ Rather than fighting this with fine-grained locking, we embrace it:
 ### 7.3 Reader Thread Pool
 
 Hybrid search benefits from parallelism:
-1. Graph ranker: BFS traversal from entities mentioned in the query
-2. Vector ranker: usearch k-NN search
-3. Keyword ranker: SQLite FTS5 BM25 query
+1. Graph ranker: Vector search over entity embeddings → BFS edge traversal from top entities to connected memories. Requires entities to have embeddings and edges (created by `extract_events` with `memory_id`).
+2. Vector ranker: usearch k-NN search over memory and chunk embeddings. Returns chunk UUIDs resolved to parent memory UUIDs via LMDB `chunks` DBI lookup. Best-scoring chunk per parent wins.
+3. Keyword ranker: SQLite FTS5 BM25 with tiered query strategy (AND → NEAR/10 → OR, with stopword filtering).
 
 These three rankers are independent and run in parallel on reader threads. The requesting thread dispatches three tasks, waits on a barrier (or three condition variables), then fuses results via RRF.
 
@@ -1430,7 +1436,7 @@ All MCP tool parameters are validated against JSON Schema before the handler is 
 - UUID format validation (reject malformed IDs before LMDB lookup)
 - ISO 8601 timestamp parsing with rejection of invalid dates
 - No path traversal in any parameter (data directory is hardcoded from config)
-- **FTS5 query sanitization:** User query strings are escaped before passing to FTS5. All FTS5 special operators (`NEAR`, `OR`, `AND`, `NOT`, `*`, `"`, `(`, `)`, `^`) are quoted or stripped. This prevents FTS5 injection attacks that could craft expensive queries for DoS.
+- **FTS5 query sanitization:** User query strings are escaped and quoted before passing to FTS5. Each term is wrapped in double quotes with internal quotes doubled. The tiered query strategy (AND → NEAR/10 → OR) uses FTS5's built-in operators safely. Query length capped at 10KB. This prevents FTS5 injection attacks that could craft expensive queries for DoS.
 
 ---
 

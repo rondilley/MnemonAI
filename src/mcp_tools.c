@@ -186,7 +186,7 @@ static cJSON *tool_store_memory(mnemon_storage_t *s, const cJSON *params)
         mem.embedding = malloc((size_t)dims * sizeof(float));
         if (mem.embedding) {
             mnemon_embed_text(embed, content, strlen(content),
-                              mem.embedding, dims);
+                              mem.embedding, dims, false);
         }
     }
 
@@ -263,7 +263,7 @@ static cJSON *tool_update_memory(mnemon_storage_t *s, const cJSON *params)
             dims = mnemon_embed_dimensions(embed);
             new_emb = malloc((size_t)dims * sizeof(float));
             if (new_emb)
-                mnemon_embed_text(embed, content, strlen(content), new_emb, dims);
+                mnemon_embed_text(embed, content, strlen(content), new_emb, dims, false);
         }
     }
 
@@ -398,7 +398,7 @@ static cJSON *tool_create_entity(mnemon_storage_t *s, const cJSON *params)
         int dims = mnemon_embed_dimensions(embed);
         ent.embedding = malloc((size_t)dims * sizeof(float));
         if (ent.embedding)
-            mnemon_embed_text(embed, name, strlen(name), ent.embedding, dims);
+            mnemon_embed_text(embed, name, strlen(name), ent.embedding, dims, false);
     }
 
     mnemon_err_t err = mnemon_store_entity(s, &ent);
@@ -715,6 +715,34 @@ static cJSON *tool_search_entities(mnemon_storage_t *s, const cJSON *params)
     return result;
 }
 
+/* BFS visitor context for tool_get_entity_graph */
+typedef struct {
+    cJSON       *nodes;     /* array of entity objects */
+    int          count;     /* entities collected */
+    int          max_nodes; /* cap to prevent unbounded growth */
+} graph_visit_ctx_t;
+
+static int graph_visit_cb(const mnemon_entity_t *entity,
+                          const mnemon_edge_t *edge,
+                          int depth, void *user_ctx)
+{
+    (void)edge;
+    graph_visit_ctx_t *ctx = (graph_visit_ctx_t *)user_ctx;
+    if (ctx->count >= ctx->max_nodes) return 1; /* stop */
+
+    cJSON *n = cJSON_CreateObject();
+    char id_str[37]; uuid_to_json_str(entity->id, id_str);
+    cJSON_AddStringToObject(n, "id", id_str);
+    cJSON_AddStringToObject(n, "name", entity->name ? entity->name : "");
+    cJSON_AddStringToObject(n, "entity_type",
+                            entity->entity_type ? entity->entity_type : "");
+    cJSON_AddNumberToObject(n, "observation_count", entity->observation_count);
+    cJSON_AddNumberToObject(n, "depth", depth);
+    cJSON_AddItemToArray(ctx->nodes, n);
+    ctx->count++;
+    return 0;
+}
+
 static cJSON *tool_get_entity_graph(mnemon_storage_t *s, const cJSON *params)
 {
     uint8_t id[16];
@@ -725,78 +753,68 @@ static cJSON *tool_get_entity_graph(mnemon_storage_t *s, const cJSON *params)
     }
 
     int depth = json_int(params, "depth", 2);
+    if (depth < 1) depth = 1;
     if (depth > 5) depth = 5;
-    (void)depth; /* TODO: wire into BFS traversal limit */
 
-    /* Get the root entity */
-    mnemon_entity_t root = {0};
-    mnemon_err_t err = mnemon_get_entity(s, id, &root);
+    /* BFS traversal up to requested depth */
+    mnemon_graph_t *graph = mnemon_storage_graph(s);
+    MDB_txn *txn;
+    mnemon_err_t err = mnemon_graph_txn_begin(graph, MDB_RDONLY, &txn);
     if (err != MNEMON_OK) {
         cJSON *e = cJSON_CreateObject();
         cJSON_AddStringToObject(e, "error", mnemon_strerror(err));
         return e;
     }
 
-    cJSON *result = cJSON_CreateObject();
-
-    /* Root entity */
-    cJSON *entity_obj = cJSON_CreateObject();
-    char id_str[37]; uuid_to_json_str(root.id, id_str);
-    cJSON_AddStringToObject(entity_obj, "id", id_str);
-    cJSON_AddStringToObject(entity_obj, "name", root.name ? root.name : "");
-    cJSON_AddStringToObject(entity_obj, "entity_type", root.entity_type ? root.entity_type : "");
-    cJSON_AddNumberToObject(entity_obj, "observation_count", root.observation_count);
-    cJSON_AddItemToObject(result, "entity", entity_obj);
-    mnemon_entity_free(&root);
-
-    /* Outgoing edges */
-    mnemon_edge_list_t edges_out = {0};
-    mnemon_get_edges_from(s, id, NULL, &edges_out);
-    cJSON *out_arr = cJSON_CreateArray();
-    for (uint32_t i = 0; i < edges_out.count && i < 100; i++) {
+    graph_visit_ctx_t ctx = {
+        .nodes     = cJSON_CreateArray(),
+        .count     = 0,
+        .max_nodes = 200
+    };
+    err = mnemon_graph_bfs(graph, txn, id, depth, graph_visit_cb, &ctx);
+    if (err != MNEMON_OK) {
+        mnemon_graph_txn_abort(txn);
+        cJSON_Delete(ctx.nodes);
         cJSON *e = cJSON_CreateObject();
-        char eid[37]; uuid_to_json_str(edges_out.edges[i].id, eid);
-        cJSON_AddStringToObject(e, "id", eid);
-        char tid[37]; uuid_to_json_str(edges_out.edges[i].target_id, tid);
-        cJSON_AddStringToObject(e, "target_id", tid);
-        if (edges_out.edges[i].edge_type)
-            cJSON_AddStringToObject(e, "edge_type", edges_out.edges[i].edge_type);
-        cJSON_AddItemToArray(out_arr, e);
+        cJSON_AddStringToObject(e, "error", mnemon_strerror(err));
+        return e;
     }
-    cJSON_AddItemToObject(result, "edges_out", out_arr);
 
-    /* Incoming edges */
-    mnemon_edge_list_t edges_in = {0};
-    mnemon_get_edges_to(s, id, NULL, &edges_in);
-    cJSON *in_arr = cJSON_CreateArray();
-    for (uint32_t i = 0; i < edges_in.count && i < 100; i++) {
-        cJSON *e = cJSON_CreateObject();
-        char eid[37]; uuid_to_json_str(edges_in.edges[i].id, eid);
-        cJSON_AddStringToObject(e, "id", eid);
-        char sid[37]; uuid_to_json_str(edges_in.edges[i].source_id, sid);
-        cJSON_AddStringToObject(e, "source_id", sid);
-        cJSON_AddItemToArray(in_arr, e);
-    }
-    cJSON_AddItemToObject(result, "edges_in", in_arr);
+    /* Collect edges for all visited entities */
+    cJSON *edges_arr = cJSON_CreateArray();
+    int edge_count = 0;
+    cJSON *node;
+    cJSON_ArrayForEach(node, ctx.nodes) {
+        const cJSON *nid = cJSON_GetObjectItemCaseSensitive(node, "id");
+        if (!cJSON_IsString(nid)) continue;
 
-    /* Related entities (targets of outgoing edges) */
-    cJSON *related = cJSON_CreateArray();
-    for (uint32_t i = 0; i < edges_out.count && i < 50; i++) {
-        mnemon_entity_t rel = {0};
-        if (mnemon_get_entity(s, edges_out.edges[i].target_id, &rel) == MNEMON_OK) {
-            cJSON *r = cJSON_CreateObject();
-            char rid[37]; uuid_to_json_str(rel.id, rid);
-            cJSON_AddStringToObject(r, "id", rid);
-            cJSON_AddStringToObject(r, "name", rel.name ? rel.name : "");
-            cJSON_AddStringToObject(r, "entity_type", rel.entity_type ? rel.entity_type : "");
-            cJSON_AddItemToArray(related, r);
-            mnemon_entity_free(&rel);
+        uint8_t node_id[16];
+        if (uuid_from_json(nid, node_id) != 0) continue;
+
+        mnemon_edge_list_t edges = {0};
+        mnemon_graph_get_edges_from(graph, txn, node_id, NULL, &edges);
+        for (uint32_t i = 0; i < edges.count && edge_count < 500; i++) {
+            cJSON *e = cJSON_CreateObject();
+            char eid[37]; uuid_to_json_str(edges.edges[i].id, eid);
+            cJSON_AddStringToObject(e, "id", eid);
+            char sid[37]; uuid_to_json_str(edges.edges[i].source_id, sid);
+            cJSON_AddStringToObject(e, "source_id", sid);
+            char tid[37]; uuid_to_json_str(edges.edges[i].target_id, tid);
+            cJSON_AddStringToObject(e, "target_id", tid);
+            if (edges.edges[i].edge_type)
+                cJSON_AddStringToObject(e, "edge_type", edges.edges[i].edge_type);
+            cJSON_AddItemToArray(edges_arr, e);
+            edge_count++;
         }
+        mnemon_edge_list_free(&edges);
     }
-    cJSON_AddItemToObject(result, "related_entities", related);
 
-    mnemon_edge_list_free(&edges_out);
-    mnemon_edge_list_free(&edges_in);
+    mnemon_graph_txn_abort(txn);
+
+    cJSON *result = cJSON_CreateObject();
+    cJSON_AddNumberToObject(result, "depth", depth);
+    cJSON_AddItemToObject(result, "nodes", ctx.nodes);
+    cJSON_AddItemToObject(result, "edges", edges_arr);
     return result;
 }
 
@@ -849,7 +867,7 @@ static cJSON *tool_import_batch(mnemon_storage_t *s, const cJSON *params)
             int dims = mnemon_embed_dimensions(embed);
             mem.embedding = malloc((size_t)dims * sizeof(float));
             if (mem.embedding)
-                mnemon_embed_text(embed, content, strlen(content), mem.embedding, dims);
+                mnemon_embed_text(embed, content, strlen(content), mem.embedding, dims, false);
         }
 
         if (mnemon_store_memory(s, &mem) == MNEMON_OK)
@@ -1522,12 +1540,28 @@ static cJSON *tool_extract_events(mnemon_storage_t *s, const cJSON *params)
     int context_year = json_int(params, "context_year", 2023);
     bool create_entities = json_bool(params, "create_entities", true);
 
+    /* Optional memory_id: links extracted entities back to source memory */
+    uint8_t mem_id[16] = {0};
+    bool has_mem_id = false;
+    const cJSON *mid_item = cJSON_GetObjectItemCaseSensitive(params,
+                                                              "memory_id");
+    if (mid_item && cJSON_IsString(mid_item)) {
+        if (uuid_from_json(mid_item, mem_id) == 0)
+            has_mem_id = true;
+    }
+
+    /* Embedding support for entity vectors */
+    mnemon_embed_t *embed = mnemon_storage_embed(s);
+    bool can_embed = embed && mnemon_embed_available(embed);
+    int dims = can_embed ? mnemon_embed_dimensions(embed) : 0;
+
     mnemon_event_list_t events = {0};
     mnemon_extract_events(content, context_year, &events);
 
     cJSON *result = cJSON_CreateObject();
     cJSON *arr = cJSON_AddArrayToObject(result, "events");
     int created = 0;
+    int edges_created = 0;
 
     for (int i = 0; i < events.count; i++) {
         cJSON *evt = cJSON_CreateObject();
@@ -1566,11 +1600,40 @@ static cJSON *tool_extract_events(mnemon_storage_t *s, const cJSON *params)
                 ent.observation_count = 1;
             }
 
+            /* Embed entity description for vector search */
+            if (can_embed) {
+                const char *desc = events.events[i].description;
+                ent.embedding = malloc((size_t)dims * sizeof(float));
+                if (ent.embedding) {
+                    if (mnemon_embed_text(embed, desc, strlen(desc),
+                                          ent.embedding, dims, false) != MNEMON_OK) {
+                        free(ent.embedding);
+                        ent.embedding = NULL;
+                    }
+                }
+            }
+
             if (mnemon_store_entity(s, &ent) == MNEMON_OK) {
                 char eid[37];
                 mnemon_uuid_to_string(&u, eid, sizeof(eid));
                 cJSON_AddStringToObject(evt, "entity_id", eid);
                 created++;
+
+                /* Create edge: entity -> source memory */
+                if (has_mem_id) {
+                    mnemon_edge_t edge = {0};
+                    mnemon_uuid_t eu;
+                    mnemon_uuid_generate(&eu);
+                    memcpy(edge.id, eu.bytes, 16);
+                    memcpy(edge.source_id, ent.id, 16);
+                    memcpy(edge.target_id, mem_id, 16);
+                    edge.edge_type = strdup("extracted_from");
+                    edge.weight = 1.0f;
+                    edge.created_at = mnemon_time_ms();
+                    if (mnemon_store_edge(s, &edge) == MNEMON_OK)
+                        edges_created++;
+                    mnemon_edge_free(&edge);
+                }
             }
             mnemon_entity_free(&ent);
         }
@@ -1580,6 +1643,7 @@ static cJSON *tool_extract_events(mnemon_storage_t *s, const cJSON *params)
 
     cJSON_AddNumberToObject(result, "extracted", events.count);
     cJSON_AddNumberToObject(result, "entities_created", created);
+    cJSON_AddNumberToObject(result, "edges_created", edges_created);
 
     mnemon_event_list_free(&events);
     return result;
@@ -1800,8 +1864,8 @@ static const mnemon_tool_def_t tool_defs[] = {
      SCHEMA("{\"type\":\"object\",\"properties\":{\"key\":{\"type\":\"string\"},\"value\":{\"type\":\"string\"}},\"required\":[\"key\",\"value\"]}")},
 
     {"extract_events", tool_extract_events,
-     "Extract dated events from text and create event entities with timestamps. Use for building a timeline from conversation content.",
-     SCHEMA("{\"type\":\"object\",\"properties\":{\"content\":{\"type\":\"string\",\"description\":\"Text to extract events from\"},\"context_year\":{\"type\":\"integer\",\"description\":\"Default year for dates without explicit year\"},\"create_entities\":{\"type\":\"boolean\",\"description\":\"Create event entities in knowledge graph (default true)\"}},\"required\":[\"content\"]}")},
+     "Extract dated events from text and create event entities with timestamps. Entities are embedded for vector search and linked to source memory via edges when memory_id is provided.",
+     SCHEMA("{\"type\":\"object\",\"properties\":{\"content\":{\"type\":\"string\",\"description\":\"Text to extract events from\"},\"context_year\":{\"type\":\"integer\",\"description\":\"Default year for dates without explicit year\"},\"create_entities\":{\"type\":\"boolean\",\"description\":\"Create event entities in knowledge graph (default true)\"},\"memory_id\":{\"type\":\"string\",\"description\":\"UUID of source memory to link entities back to via edges\"}},\"required\":[\"content\"]}")},
 
     {"search_events", tool_search_events,
      "Search for dated events by event date range. Returns events sorted chronologically. Unlike search_temporal (which filters by storage time), this searches by the actual event dates extracted from content.",

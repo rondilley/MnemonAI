@@ -19,7 +19,8 @@ mnemon_err_t mnemon_embed_init(mnemon_embed_t **out, const char *model_path,
 void         mnemon_embed_free(mnemon_embed_t *e);
 
 mnemon_err_t mnemon_embed_text(mnemon_embed_t *e, const char *text,
-                               size_t text_len, float *out, int dimensions);
+                               size_t text_len, float *out, int dimensions,
+                               bool is_query);
 mnemon_err_t mnemon_embed_batch(mnemon_embed_t *e, const char **texts,
                                 const size_t *text_lens, size_t count,
                                 float *out, int dimensions);

@@ -30,6 +30,7 @@ Options (env vars):
     MNEMON_LONGMEMEVAL_RESULTS=path    Results JSONL path (default: auto)
     MNEMON_LONGMEMEVAL_PACE=2.0        Judge pacing: seconds between API calls
     MNEMON_LONGMEMEVAL_MODEL=path      Override chat model GGUF path
+    MNEMON_LONGMEMEVAL_ABLATION=hybrid Ablation: hybrid, keyword, vector
     MNEMON_USE_VALGRIND=1              Run under valgrind
 
 Reference: https://arxiv.org/abs/2410.10813
@@ -216,26 +217,37 @@ def _ndcg(relevances, k):
 
 
 def evaluate_retrieval(search_results, question):
-    """Compute retrieval quality metrics.
+    """Compute retrieval quality metrics with per-ranker diagnostics.
 
     Returns dict with: recall_at_5, recall_at_10, ndcg_at_5, ndcg_at_10,
-    session_recall, answer_found, num_results, retrieval_ms (if timed externally).
+    session_recall, answer_found, num_results, plus ranker diagnostics:
+    ranker_contributions, correct_session_details (miss explanation).
     """
     answer = str(question["answer"])
     correct_ids = set(question["answer_session_ids"])
 
-    # Extract ranked session IDs from search results (preserving order)
+    # Extract ranked session IDs and per-result ranker scores
     ranked_ids = []
+    ranked_scores = []  # parallel: {sid, rank, score, vector, keyword, graph}
     all_content = ""
-    for r in search_results:
+    for rank_idx, r in enumerate(search_results):
         content = r.get("content", "")
         all_content += " " + content
+        sid = None
         for line in content.split("\n"):
             if line.startswith("[Session ID: "):
                 sid = line[13:-1]
-                if sid not in ranked_ids:
-                    ranked_ids.append(sid)
-                break  # One session ID per result
+                break
+        if sid and sid not in ranked_ids:
+            ranked_ids.append(sid)
+            ranked_scores.append({
+                "sid": sid,
+                "rank": rank_idx + 1,
+                "score": r.get("score", 0) or 0,
+                "vector_score": r.get("vector_score", 0) or 0,
+                "keyword_score": r.get("keyword_score", 0) or 0,
+                "graph_score": r.get("graph_score", 0) or 0,
+            })
 
     # R@K: did any correct session appear in top K?
     def recall_at_k(k):
@@ -255,6 +267,49 @@ def evaluate_retrieval(search_results, question):
     ans_norm = normalize(answer)
     answer_found = ans_norm in all_norm if ans_norm else False
 
+    # Per-ranker contribution stats
+    n = len(ranked_scores)
+    has_vector = sum(1 for s in ranked_scores if s["vector_score"] > 0)
+    has_keyword = sum(1 for s in ranked_scores if s["keyword_score"] > 0)
+    has_graph = sum(1 for s in ranked_scores if s["graph_score"] > 0)
+    avg_vector = (_avg([s["vector_score"] for s in ranked_scores
+                        if s["vector_score"] > 0]) if has_vector else 0)
+    avg_keyword = (_avg([s["keyword_score"] for s in ranked_scores
+                         if s["keyword_score"] > 0]) if has_keyword else 0)
+    avg_graph = (_avg([s["graph_score"] for s in ranked_scores
+                       if s["graph_score"] > 0]) if has_graph else 0)
+
+    # Miss explanation: where did the correct sessions rank?
+    correct_details = []
+    sid_to_entry = {s["sid"]: s for s in ranked_scores}
+    for cid in correct_ids:
+        entry = sid_to_entry.get(cid)
+        if entry:
+            correct_details.append({
+                "sid": cid, "rank": entry["rank"],
+                "score": entry["score"],
+                "vector_score": entry["vector_score"],
+                "keyword_score": entry["keyword_score"],
+                "graph_score": entry["graph_score"],
+                "in_top5": entry["rank"] <= 5,
+            })
+        else:
+            correct_details.append({
+                "sid": cid, "rank": -1,
+                "score": 0, "vector_score": 0,
+                "keyword_score": 0, "graph_score": 0,
+                "in_top5": False,
+            })
+
+    # What beat the correct session? (for R@5 misses)
+    beat_by = []
+    if recall_at_k(5) == 0.0 and correct_details:
+        best_correct_rank = min(
+            (d["rank"] for d in correct_details if d["rank"] > 0),
+            default=-1)
+        if best_correct_rank > 5:
+            beat_by = [s for s in ranked_scores[:5]]
+
     return {
         "recall_at_5": recall_at_k(5),
         "recall_at_10": recall_at_k(10),
@@ -263,6 +318,17 @@ def evaluate_retrieval(search_results, question):
         "session_recall": session_recall,
         "answer_found": answer_found,
         "num_results": len(search_results),
+        "ranker_contributions": {
+            "total_results": n,
+            "has_vector": has_vector,
+            "has_keyword": has_keyword,
+            "has_graph": has_graph,
+            "avg_vector": round(avg_vector, 4),
+            "avg_keyword": round(avg_keyword, 4),
+            "avg_graph": round(avg_graph, 4),
+        },
+        "correct_session_details": correct_details,
+        "beat_by": beat_by,
     }
 
 
@@ -361,6 +427,7 @@ def phase_generate(dataset, variant, agent_mode, model_path, model_info,
     ingested = 0
     stored_ok = 0
     store_errors = 0
+    sid_to_memid = {}  # session_id -> memory UUID (for edge linking)
     for sid, (sess, sdate) in all_sessions.items():
         req_id += 1
         content = session_to_content(sess, session_id=sid, session_date=sdate)
@@ -384,6 +451,7 @@ def phase_generate(dataset, variant, agent_mode, model_path, model_info,
                 break
         else:
             stored_ok += 1
+            sid_to_memid[sid] = r["id"]
         ingested += 1
         if ingested % 500 == 0:
             elapsed = time.monotonic() - ingest_start
@@ -398,9 +466,11 @@ def phase_generate(dataset, variant, agent_mode, model_path, model_info,
           f"{f' ({store_errors} errors)' if store_errors else ''}")
 
     # ---- Step 3: Extract events for temporal reasoning ----
-    # Run extract_events on a sample of sessions to populate event entities
+    # Run extract_events on sessions to populate event entities with embeddings
+    # and edges linking back to source memories (activates graph ranker)
     event_start = time.monotonic()
     events_created = 0
+    edges_created = 0
     for sid, (sess, sdate) in list(all_sessions.items()):
         # Extract from user turns only (where events are mentioned)
         user_text = "\n".join(
@@ -416,26 +486,43 @@ def phase_generate(dataset, variant, agent_mode, model_path, model_info,
                 except (ValueError, IndexError):
                     pass
         req_id += 1
-        r, ie = call_tool(proc, "extract_events", {
+        args = {
             "content": user_text[:4000],
             "context_year": context_year,
             "create_entities": True,
-        }, req_id)
+        }
+        # Link entities to source memory via edges
+        mem_id = sid_to_memid.get(sid)
+        if mem_id:
+            args["memory_id"] = mem_id
+        r, ie = call_tool(proc, "extract_events", args, req_id)
         if not ie:
             events_created += r.get("entities_created", 0)
+            edges_created += r.get("edges_created", 0)
 
     event_ms = (time.monotonic() - event_start) * 1000
-    print(f"    Extracted {events_created} event entities ({event_ms/1000:.1f}s)")
+    print(f"    Extracted {events_created} event entities, "
+          f"{edges_created} edges ({event_ms/1000:.1f}s)")
 
     # ---- Step 4: Get stats ----
     req_id += 1
     stats, _ = call_tool(proc, "get_memory_stats", {}, req_id)
     print(f"    Database: {stats.get('total_memories', 0)} memories, "
           f"{stats.get('total_entities', 0)} entities, "
-          f"{stats.get('memory_vectors', 0)} vectors")
+          f"{stats.get('total_edges', 0)} edges, "
+          f"{stats.get('memory_vectors', 0)} mem vectors, "
+          f"{stats.get('entity_vectors', 0)} entity vectors")
 
     # ---- Step 5: Query each question against full corpus ----
-    print(f"\n    Querying {len(dataset)} questions...")
+    search_mode = os.environ.get("MNEMON_LONGMEMEVAL_ABLATION", "hybrid")
+    search_tool_map = {
+        "hybrid": "search_hybrid",
+        "keyword": "search_keyword",
+        "vector": "search_semantic",
+    }
+    search_tool = search_tool_map.get(search_mode, "search_hybrid")
+    print(f"\n    Querying {len(dataset)} questions "
+          f"(mode: {search_mode}, tool: {search_tool})...")
     results_file = open(results_path, "w")
     total = len(dataset)
     query_times = []
@@ -466,10 +553,10 @@ def phase_generate(dataset, variant, agent_mode, model_path, model_info,
 
         agent_ms = (time.monotonic() - agent_start) * 1000
 
-        # -- Retrieval metrics (always run search_hybrid) --
+        # -- Retrieval metrics (ablation-aware) --
         req_id += 1
         t0 = time.monotonic()
-        r, ie = call_tool(proc, "search_hybrid",
+        r, ie = call_tool(proc, search_tool,
                           {"query": query_text, "top_k": top_k}, req_id)
         search_ms = (time.monotonic() - t0) * 1000
         query_times.append(search_ms)
@@ -490,7 +577,11 @@ def phase_generate(dataset, variant, agent_mode, model_path, model_info,
             "session_recall": retrieval["session_recall"],
             "answer_found": retrieval["answer_found"],
             "num_results": retrieval["num_results"],
+            "ranker_contributions": retrieval["ranker_contributions"],
+            "correct_session_details": retrieval["correct_session_details"],
+            "beat_by": retrieval["beat_by"],
             "search_ms": search_ms,
+            "search_mode": search_mode,
             "ingest_ms": ingest_ms / total,  # Amortized
             "agent_ms": agent_ms,
             "agent_inference_ms": agent_timing["inference_ms"],
@@ -506,11 +597,31 @@ def phase_generate(dataset, variant, agent_mode, model_path, model_info,
         if verbose:
             r5 = retrieval["recall_at_5"]
             sr = retrieval["session_recall"] * 100
+            rc = retrieval["ranker_contributions"]
             print(f"  [{qi+1}/{total}] {qid} R@5={'HIT' if r5 else 'MISS'} "
-                  f"sr={sr:.0f}% {search_ms:.1f}ms", end="")
+                  f"sr={sr:.0f}% {search_ms:.1f}ms "
+                  f"[V:{rc['has_vector']}/{rc['total_results']} "
+                  f"K:{rc['has_keyword']}/{rc['total_results']} "
+                  f"G:{rc['has_graph']}/{rc['total_results']}]", end="")
             if generated_answer:
                 print(f"  -> {generated_answer[:60]}...", end="")
             print()
+            # Miss explanation
+            if r5 == 0.0 and retrieval["correct_session_details"]:
+                for cd in retrieval["correct_session_details"]:
+                    rank_str = (f"rank {cd['rank']}"
+                                if cd["rank"] > 0 else "NOT RETRIEVED")
+                    print(f"    correct {cd['sid']}: {rank_str} "
+                          f"(v={cd['vector_score']:.4f} "
+                          f"k={cd['keyword_score']:.4f} "
+                          f"g={cd['graph_score']:.4f})")
+                if retrieval["beat_by"]:
+                    print(f"    beaten by top-5:")
+                    for bb in retrieval["beat_by"][:3]:
+                        print(f"      rank {bb['rank']} {bb['sid'][:12]}.. "
+                              f"s={bb['score']:.4f} "
+                              f"v={bb['vector_score']:.4f} "
+                              f"k={bb['keyword_score']:.4f}")
 
         if not verbose:
             if (qi + 1) % 50 == 0:
@@ -528,8 +639,13 @@ def phase_generate(dataset, variant, agent_mode, model_path, model_info,
     # -- Summary --
     avg_search = _avg(query_times)
     print(f"\n\n  Phase 1 complete: {total} questions")
+    print(f"    Search mode: {search_mode}")
     print(f"    Corpus:     {total_sessions} sessions"
           f" ({events_created} event entities)")
+    print(f"    Database:   {stats.get('total_memories', '?')} memories, "
+          f"{stats.get('total_edges', '?')} edges, "
+          f"{stats.get('memory_vectors', '?')} mem vectors, "
+          f"{stats.get('entity_vectors', '?')} entity vectors")
     print(f"    Ingest:     {ingest_ms/1000:.1f}s "
           f"({ingest_ms/total_sessions:.1f}ms/session)")
     print(f"    Avg search: {avg_search:.1f}ms")
@@ -721,6 +837,127 @@ def print_report(results, variant, judge_names=None):
         print(f"    Judge accuracy:   {totals['jc']}/{totals['jn']} "
               f"({overall_judge:.1f}%)  [{jnames}]")
 
+    # ---- Ranker contribution analysis ----
+    has_ranker = any("ranker_contributions" in r for r in results)
+    if has_ranker:
+        print(f"\n{'='*72}")
+        print("  RANKER CONTRIBUTION ANALYSIS")
+        print(f"{'='*72}")
+
+        # Aggregate ranker stats across all questions
+        all_rc = [r["ranker_contributions"] for r in results
+                  if "ranker_contributions" in r]
+        total_q = len(all_rc)
+        if total_q > 0:
+            avg_has_v = _avg([rc["has_vector"] for rc in all_rc])
+            avg_has_k = _avg([rc["has_keyword"] for rc in all_rc])
+            avg_has_g = _avg([rc["has_graph"] for rc in all_rc])
+            avg_total = _avg([rc["total_results"] for rc in all_rc])
+            avg_v_score = _avg([rc["avg_vector"] for rc in all_rc
+                                if rc["avg_vector"] > 0])
+            avg_k_score = _avg([rc["avg_keyword"] for rc in all_rc
+                                if rc["avg_keyword"] > 0])
+            avg_g_score = _avg([rc["avg_graph"] for rc in all_rc
+                                if rc["avg_graph"] > 0])
+
+            # Queries where ranker contributed at least 1 result
+            q_with_v = sum(1 for rc in all_rc if rc["has_vector"] > 0)
+            q_with_k = sum(1 for rc in all_rc if rc["has_keyword"] > 0)
+            q_with_g = sum(1 for rc in all_rc if rc["has_graph"] > 0)
+
+            print(f"\n  Avg results per query: {avg_total:.1f}")
+            print(f"\n  {'Ranker':<10s} {'Queries w/ hits':>15s} "
+                  f"{'Avg hits/query':>15s} {'Avg score':>12s}")
+            print(f"  {'-'*55}")
+            print(f"  {'Vector':<10s} {q_with_v:>8d}/{total_q:<6d} "
+                  f"{avg_has_v:>12.1f}   {avg_v_score:>10.4f}")
+            print(f"  {'Keyword':<10s} {q_with_k:>8d}/{total_q:<6d} "
+                  f"{avg_has_k:>12.1f}   {avg_k_score:>10.4f}")
+            print(f"  {'Graph':<10s} {q_with_g:>8d}/{total_q:<6d} "
+                  f"{avg_has_g:>12.1f}   {avg_g_score:>10.4f}")
+
+        # Per-type ranker breakdown
+        for qtype in ["single-session-user", "single-session-assistant",
+                       "single-session-preference", "multi-session",
+                       "temporal-reasoning", "knowledge-update"]:
+            type_rc = [r["ranker_contributions"] for r in results
+                       if r.get("question_type") == qtype
+                       and "ranker_contributions" in r]
+            if not type_rc:
+                continue
+            tn = len(type_rc)
+            tv = sum(1 for rc in type_rc if rc["has_vector"] > 0)
+            tk = sum(1 for rc in type_rc if rc["has_keyword"] > 0)
+            tg = sum(1 for rc in type_rc if rc["has_graph"] > 0)
+            print(f"\n  {qtype}: V={tv}/{tn} K={tk}/{tn} G={tg}/{tn}")
+
+    # ---- Miss analysis ----
+    has_misses = any(r.get("correct_session_details") for r in results)
+    if has_misses:
+        print(f"\n{'='*72}")
+        print("  MISS ANALYSIS (R@5 failures)")
+        print(f"{'='*72}")
+
+        misses = [r for r in results
+                  if r.get("recall_at_5", 1) == 0.0
+                  and r.get("correct_session_details")]
+        total_misses = len(misses)
+        total_q = len(results)
+        print(f"\n  {total_misses}/{total_q} questions missed at R@5")
+
+        if misses:
+            # Categorize misses: not retrieved vs ranked too low
+            not_retrieved = 0
+            ranked_low = 0
+            low_ranks = []
+            for m in misses:
+                for cd in m["correct_session_details"]:
+                    if cd["rank"] == -1:
+                        not_retrieved += 1
+                    elif cd["rank"] > 5:
+                        ranked_low += 1
+                        low_ranks.append(cd["rank"])
+
+            print(f"  Correct session not retrieved at all: {not_retrieved}")
+            print(f"  Correct session retrieved but rank > 5: {ranked_low}")
+            if low_ranks:
+                print(f"    Rank distribution: "
+                      f"median={sorted(low_ranks)[len(low_ranks)//2]} "
+                      f"min={min(low_ranks)} max={max(low_ranks)}")
+
+            # Score breakdown for missed correct sessions
+            missed_v = [cd["vector_score"]
+                        for m in misses
+                        for cd in m["correct_session_details"]
+                        if cd["rank"] > 0]
+            missed_k = [cd["keyword_score"]
+                        for m in misses
+                        for cd in m["correct_session_details"]
+                        if cd["rank"] > 0]
+            missed_g = [cd["graph_score"]
+                        for m in misses
+                        for cd in m["correct_session_details"]
+                        if cd["rank"] > 0]
+            if missed_v:
+                print(f"\n  Correct sessions (retrieved but ranked low):")
+                print(f"    Avg vector_score:  {_avg(missed_v):.4f}")
+                print(f"    Avg keyword_score: {_avg(missed_k):.4f}")
+                print(f"    Avg graph_score:   {_avg(missed_g):.4f}")
+
+            # Miss breakdown by type
+            print(f"\n  {'Question type':<35s} {'Misses':>8s} {'Rate':>8s}")
+            print(f"  {'-'*53}")
+            for qtype in ["single-session-user", "single-session-assistant",
+                           "single-session-preference", "multi-session",
+                           "temporal-reasoning", "knowledge-update"]:
+                type_total = sum(1 for r in results
+                                 if r.get("question_type") == qtype)
+                type_miss = sum(1 for m in misses
+                                if m.get("question_type") == qtype)
+                if type_total > 0:
+                    print(f"  {qtype:<35s} {type_miss:>5d}/{type_total:<2d} "
+                          f"{type_miss/type_total*100:>6.1f}%")
+
     # ---- Performance ----
     search = [r["search_ms"] for r in results if "search_ms" in r]
     ingest = [r["ingest_ms"] for r in results if "ingest_ms" in r]
@@ -734,7 +971,8 @@ def print_report(results, variant, judge_names=None):
     corpus = results[0].get("corpus_size", 0) if results else 0
     events = results[0].get("events_total", 0) if results else 0
 
-    print(f"\n  Performance (mnemond):")
+    search_mode = results[0].get("search_mode", "hybrid") if results else "?"
+    print(f"\n  Performance (mnemond, mode={search_mode}):")
     if corpus:
         print(f"    Corpus:           {corpus} sessions, {events} events")
     if ingest:

@@ -130,6 +130,18 @@ typedef struct mnemon_memory {
 void mnemon_memory_free(mnemon_memory_t *mem);
 
 /* ------------------------------------------------------------------ */
+/* Chunk metadata (for chunked vector indexing)                        */
+/* ------------------------------------------------------------------ */
+
+typedef struct {
+    uint8_t  id[16];            /* chunk UUID */
+    uint8_t  parent_id[16];     /* parent memory UUID */
+    uint32_t sequence;          /* chunk index within parent */
+    uint32_t byte_offset;       /* offset into parent content */
+    uint32_t byte_length;       /* length of chunk in bytes */
+} mnemon_chunk_meta_t;
+
+/* ------------------------------------------------------------------ */
 /* Search results                                                      */
 /* ------------------------------------------------------------------ */
 

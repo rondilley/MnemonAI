@@ -609,7 +609,8 @@ int main(int argc, char *argv[])
             float *test_emb = malloc((size_t)mnemon_embed_dimensions(embed) * sizeof(float));
             if (test_emb) {
                 err = mnemon_embed_text(embed, "warmup test", 11,
-                                        test_emb, mnemon_embed_dimensions(embed));
+                                        test_emb, mnemon_embed_dimensions(embed),
+                                        false);
                 if (err == MNEMON_OK) {
                     mnemon_log(MNEMON_LOG_INFO,
                                "warmup: complete (%d dimensions). "

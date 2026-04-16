@@ -212,44 +212,35 @@ Search latency includes FTS5 BM25 + usearch HNSW + graph traversal + RRF fusion.
 
 ## 7. Identified Gaps and Improvement Roadmap
 
-### Critical (High Impact on R@5)
+### Implemented (2026-04-09)
 
-1. **Semantic search quality**: With 19K sessions, BM25 keyword matching is insufficient. The embedding model (nomic-embed, 2048 token context) truncates long sessions, losing information. Consider:
-   - Chunking long sessions into overlapping segments before embedding
-   - Using a longer-context embedding model (e.g., nomic-embed-text-v2 if available)
-   - Re-ranking the top-50 BM25 results using embedding similarity
+The following improvements have been implemented in response to this benchmark and the subsequent retrieval analysis (see `doc/RETRIEVAL-ANALYSIS.md` Section 7 for full details):
 
-2. **User message retrieval**: 11.4% R@5 on user messages vs 87.5% on assistant messages. User turns are conversational and generic. Consider:
-   - Indexing user and assistant turns separately
-   - Extracting key facts/entities from user turns and storing as searchable metadata
-   - Query expansion: reformulate search queries to include likely assistant vocabulary
+1. **Chunked vector indexing (P3)**: Long memories (>800 bytes) are split into ~800-byte chunks at conversation turn boundaries. Each chunk gets its own embedding and vector index entry. Chunk UUIDs resolve to parent memory UUIDs during search. This addresses the embedding context window limitation — chunks are well within the 2048-token limit.
 
-3. **Preference retrieval**: 3.3% R@5. Preferences are implicit in conversation context. Consider:
-   - Explicit preference extraction during ingestion (entity type "preference")
-   - Separate preference search tool
+2. **Embedding task prefixes + bookend truncation**: `search_document:` / `search_query:` prefixes for nomic-embed asymmetric retrieval. When text exceeds context, keeps first half + last half of tokens instead of front-only truncation. Vector scores went from 0.0 to 0.53 avg on oracle variant.
 
-### Important (Medium Impact)
+3. **Graph ranker activation (P1)**: `extract_events` now embeds entity descriptions and creates `extracted_from` edges to source memories (via new `memory_id` parameter). Graph ranker went from 0 contributions to active on every query.
 
-4. **Multi-session synthesis**: 17.3% R@5. The search returns sessions matching the query, but MR questions need data from multiple sessions that individually may not match. Consider:
-   - Graph-based retrieval: find entities mentioned in the query, traverse to related sessions
-   - Multi-hop search: search, extract entities, search again for related content
+4. **Tiered FTS queries (P2)**: AND (all non-stopword terms) → NEAR/10 (proximity) → OR (any term). 57 English stopwords filtered. Keyword precision improved (avg score 4.43 → 4.77).
 
-5. **Temporal event search integration**: Event entities are created but `search_events` isn't used by default search. Consider:
-   - Including event entity results in `search_hybrid` RRF fusion
-   - Boosting sessions that contain matching event dates
+5. **Benchmark instrumentation (P0)**: Per-ranker score capture, miss explanations, ablation modes (`MNEMON_LONGMEMEVAL_ABLATION=keyword|vector|hybrid`), Ranker Contribution Analysis and Miss Analysis report sections.
 
-6. **Embedding context window**: 2048 tokens (~8KB) truncates ~30% of S-variant sessions. Consider:
-   - Chunked embedding with overlap
-   - Longer-context embedding models
-   - Mean pooling across chunks
+### Remaining (Pending Re-benchmark)
+
+6. **User message retrieval**: 11.4% R@5 on user messages vs 87.5% on assistant messages. User turns are conversational and generic. Chunked indexing may help by giving user turns their own embeddings. Re-benchmark needed to measure impact.
+
+7. **Preference retrieval**: 3.3% R@5. Preferences are implicit in conversation context. Consider explicit preference extraction during ingestion.
+
+8. **Multi-session synthesis**: 17.3% R@5. Graph-based retrieval (now activated) may help traverse from entities to related sessions across conversation boundaries.
 
 ### Nice-to-Have
 
-7. **Secret detection tuning**: 133 false positives out of 19,195 sessions (0.7%). The remaining triggers are likely code snippets and formatted data that look high-entropy.
+9. **Secret detection tuning**: 133 false positives out of 19,195 sessions (0.7%). The remaining triggers are likely code snippets and formatted data that look high-entropy.
 
-8. **Search latency**: p99 of 618ms is acceptable but could be improved. Profile to identify if FTS5, usearch, or graph traversal is the bottleneck.
+10. **Search latency**: p99 of 618ms is acceptable but could be improved. Profile to identify if FTS5, usearch, or graph traversal is the bottleneck.
 
-9. **Ingestion rate with embeddings**: 55ms/session (18/s) is GPU-bound. Batch embedding (`mnemon_embed_batch`) should improve throughput significantly.
+11. **Ingestion rate with embeddings**: 55ms/session (18/s) is GPU-bound. Batch embedding (`mnemon_embed_batch`) should improve throughput significantly. Chunked indexing adds overhead (~387ms/session with GPU) but search latency is unchanged.
 
 ---
 
@@ -281,6 +272,11 @@ cd build
 # Retrieval only (fastest, no API needed)
 MNEMON_LONGMEMEVAL_VARIANT=s MNEMON_LONGMEMEVAL_AGENT=none \
   MNEMON_LONGMEMEVAL_JUDGES=none \
+  python3 ../test/test_longmemeval.py generate
+
+# With ablation (keyword-only, vector-only, or hybrid)
+MNEMON_LONGMEMEVAL_ABLATION=keyword \
+  MNEMON_LONGMEMEVAL_AGENT=none MNEMON_LONGMEMEVAL_JUDGES=none \
   python3 ../test/test_longmemeval.py generate
 
 # With API agent + judges

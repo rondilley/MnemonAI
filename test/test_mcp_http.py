@@ -203,7 +203,7 @@ def main():
 
     # get_entity_graph
     r, ie = call_tool(port, "get_entity_graph", {"entity_id": ent_a}, 25)
-    test("[HTTP] get_entity_graph", "entity" in r and "edges_out" in r)
+    test("[HTTP] get_entity_graph", "nodes" in r and "edges" in r)
 
     # get_history
     r, ie = call_tool(port, "get_history", {"entity_id": ent_a}, 30)

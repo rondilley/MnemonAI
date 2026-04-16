@@ -93,7 +93,7 @@ static int store_chunk(mnemon_storage_t *s, const char *content,
         int dims = mnemon_embed_dimensions(embed);
         mem.embedding = malloc((size_t)dims * sizeof(float));
         if (mem.embedding)
-            mnemon_embed_text(embed, content, strlen(content), mem.embedding, dims);
+            mnemon_embed_text(embed, content, strlen(content), mem.embedding, dims, false);
     }
 
     mnemon_err_t err = mnemon_store_memory(s, &mem);

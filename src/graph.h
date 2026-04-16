@@ -81,4 +81,11 @@ mnemon_err_t mnemon_graph_count(mnemon_graph_t *g, MDB_txn *txn,
                                 size_t *entities, size_t *edges,
                                 size_t *memories);
 
+/* Chunk metadata */
+mnemon_err_t mnemon_graph_put_chunk(mnemon_graph_t *g, MDB_txn *txn,
+                                    const mnemon_chunk_meta_t *c);
+mnemon_err_t mnemon_graph_get_chunk(mnemon_graph_t *g, MDB_txn *txn,
+                                    const uint8_t chunk_id[16],
+                                    mnemon_chunk_meta_t *out);
+
 #endif /* MNEMON_GRAPH_H */

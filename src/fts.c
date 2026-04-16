@@ -15,6 +15,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <ctype.h>
+#include <strings.h>
 
 #include <sqlite3.h>
 
@@ -243,69 +244,120 @@ mnemon_err_t mnemon_fts_update_entity(mnemon_fts_t *f, const mnemon_entity_t *e)
 }
 
 /* Sanitize FTS5 query: quote each word */
-static char *sanitize_query(const char *input)
+/* FTS5 query tier:
+ *   TIER_AND  — all words must be present (highest precision)
+ *   TIER_NEAR — words within 10 tokens of each other
+ *   TIER_OR   — any word matches (original behavior, lowest precision)
+ */
+enum fts_tier { TIER_AND, TIER_NEAR, TIER_OR };
+
+/* Common words that add noise to AND/NEAR queries.  Kept short to avoid
+ * false positives -- these are the highest-frequency English function words
+ * that rarely contribute to retrieval quality in FTS5 BM25. */
+static bool is_stopword(const char *w, size_t len)
+{
+    static const char *stops[] = {
+        "a","an","the","is","was","are","were","be","been","am",
+        "do","did","does","have","has","had","will","would","shall",
+        "should","can","could","may","might","must",
+        "i","me","my","we","our","you","your","he","she","it","they",
+        "his","her","its","them","their",
+        "in","on","at","to","for","of","with","by","from","as",
+        "and","or","but","not","no","if","so","that","this","what",
+        "which","who","how","when","where","why",
+        NULL
+    };
+    for (const char **s = stops; *s; s++) {
+        if (strlen(*s) == len && strncasecmp(*s, w, len) == 0)
+            return true;
+    }
+    return false;
+}
+
+static char *sanitize_query(const char *input, enum fts_tier tier)
 {
     if (!input || !input[0]) return NULL;
 
     size_t len = strlen(input);
     if (len > 10000) len = 10000;  /* cap query length to prevent abuse */
-    /* Worst case: every char is '"' (doubled) + 2 quotes per word + " OR " separators.
-     * Budget: len*2 (doubled quotes) + len (OR separators) + len (quotes) + 1 */
-    char *buf = malloc(len * 4 + len + 1);
+
+    /* Collect non-stopword tokens for AND/NEAR, all tokens for OR */
+    /* Budget: len*4 (quoted doubled) + separators + NEAR syntax + 1 */
+    char *buf = malloc(len * 5 + 64);
     if (!buf) return NULL;
 
-    size_t pos = 0;
-    const char *p = input;
-    bool first = true;
+    /* First pass: extract words, filter stopwords for AND/NEAR */
+    typedef struct { const char *start; size_t len; } word_t;
+    word_t *words = malloc(len * sizeof(word_t));
+    if (!words) { free(buf); return NULL; }
+    int nwords = 0;
 
-    while (*p) {
+    const char *p = input;
+    while (*p && (size_t)(p - input) < len) {
         while (*p && isspace((unsigned char)*p)) p++;
         if (!*p) break;
-
-        const char *word_start = p;
+        const char *ws = p;
         while (*p && !isspace((unsigned char)*p)) p++;
-        size_t wlen = (size_t)(p - word_start);
+        size_t wl = (size_t)(p - ws);
+        if (tier == TIER_OR || !is_stopword(ws, wl))
+            words[nwords++] = (word_t){ws, wl};
+    }
 
-        if (!first) { buf[pos++] = ' '; buf[pos++] = 'O'; buf[pos++] = 'R'; buf[pos++] = ' '; }
-        buf[pos++] = '"';
-        for (size_t i = 0; i < wlen; i++) {
-            if (word_start[i] == '"') { buf[pos++] = '"'; buf[pos++] = '"'; }
-            else buf[pos++] = word_start[i];
+    /* If stopword filtering removed all words, include everything */
+    if (nwords == 0 && tier != TIER_OR) {
+        free(words);
+        free(buf);
+        return sanitize_query(input, TIER_OR);
+    }
+    if (nwords == 0) { free(words); free(buf); return NULL; }
+
+    /* Build FTS5 query string */
+    size_t pos = 0;
+    const char *sep;
+    switch (tier) {
+    case TIER_AND:  sep = " AND "; break;
+    case TIER_NEAR: sep = " NEAR/10 "; break;
+    case TIER_OR:   sep = " OR "; break;
+    }
+    size_t sep_len = strlen(sep);
+
+    for (int i = 0; i < nwords; i++) {
+        if (i > 0) {
+            memcpy(buf + pos, sep, sep_len);
+            pos += sep_len;
         }
         buf[pos++] = '"';
-        first = false;
+        for (size_t j = 0; j < words[i].len; j++) {
+            if (words[i].start[j] == '"') { buf[pos++] = '"'; buf[pos++] = '"'; }
+            else buf[pos++] = words[i].start[j];
+        }
+        buf[pos++] = '"';
     }
     buf[pos] = '\0';
+
+    free(words);
     return buf;
 }
 
-mnemon_err_t mnemon_fts_search(mnemon_fts_t *f, const char *query, int top_k,
-                               mnemon_fts_results_t *out)
+/* Execute a single FTS5 MATCH query at a given tier. Returns result count. */
+static int fts_exec_tier(mnemon_fts_t *f, const char *query, enum fts_tier tier,
+                         int top_k, mnemon_fts_results_t *out)
 {
+    char *sq = sanitize_query(query, tier);
+    if (!sq) return 0;
+
     sqlite3_stmt *stmt;
-    int rc;
-
-    if (!f || !query || !out) return MNEMON_ERR_INVALID_INPUT;
-    memset(out, 0, sizeof(*out));
-
-    char *sq = sanitize_query(query);
-    if (!sq) return MNEMON_OK;  /* empty/invalid query -> zero results */
-
-    rc = sqlite3_prepare_v2(f->db,
+    int rc = sqlite3_prepare_v2(f->db,
         "SELECT m.uuid, m.source_type, f.rank "
         "FROM memory_fts f "
         "JOIN fts_id_map m ON f.rowid = m.rowid "
         "WHERE memory_fts MATCH ? "
         "ORDER BY f.rank "
         "LIMIT ?", -1, &stmt, NULL);
-    if (rc != SQLITE_OK) { free(sq); return MNEMON_ERR_SQLITE; }
+    if (rc != SQLITE_OK) { free(sq); return 0; }
 
     sqlite3_bind_text(stmt, 1, sq, -1, SQLITE_TRANSIENT);
-    sqlite3_bind_int(stmt, 2, top_k > 0 ? top_k : 10);
-
-    out->results = calloc((size_t)(top_k > 0 ? top_k : 10),
-                          sizeof(mnemon_fts_result_t));
-    if (!out->results) { sqlite3_finalize(stmt); free(sq); return MNEMON_ERR_OOM; }
+    sqlite3_bind_int(stmt, 2, top_k);
 
     int count = 0;
     while (sqlite3_step(stmt) == SQLITE_ROW && count < top_k) {
@@ -318,10 +370,31 @@ mnemon_err_t mnemon_fts_search(mnemon_fts_t *f, const char *query, int top_k,
         out->results[count].score = -(float)sqlite3_column_double(stmt, 2);
         count++;
     }
-    out->count = count;
 
     sqlite3_finalize(stmt);
     free(sq);
+    return count;
+}
+
+mnemon_err_t mnemon_fts_search(mnemon_fts_t *f, const char *query, int top_k,
+                               mnemon_fts_results_t *out)
+{
+    if (!f || !query || !out) return MNEMON_ERR_INVALID_INPUT;
+    memset(out, 0, sizeof(*out));
+
+    int k = top_k > 0 ? top_k : 10;
+    out->results = calloc((size_t)k, sizeof(mnemon_fts_result_t));
+    if (!out->results) return MNEMON_ERR_OOM;
+
+    /* Tiered query strategy: AND (precise) -> NEAR/10 -> OR (broad).
+     * Stop at the first tier that returns results. */
+    int count = fts_exec_tier(f, query, TIER_AND, k, out);
+    if (count == 0)
+        count = fts_exec_tier(f, query, TIER_NEAR, k, out);
+    if (count == 0)
+        count = fts_exec_tier(f, query, TIER_OR, k, out);
+    out->count = count;
+
     return MNEMON_OK;
 }
 

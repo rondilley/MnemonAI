@@ -116,13 +116,13 @@ mnemond --stdio --config /path/to/config.conf
 
 ```
 -> {"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"my-client","version":"1.0"}}}
-<- {"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2024-11-05","capabilities":{"tools":{}},"serverInfo":{"name":"mnemond","version":"0.4.0"}}}
+<- {"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2024-11-05","capabilities":{"tools":{}},"serverInfo":{"name":"mnemond","version":"0.7.0"}}}
 -> {"jsonrpc":"2.0","method":"notifications/initialized"}
    (no response -- this is a notification)
 -> {"jsonrpc":"2.0","id":2,"method":"tools/list"}
 <- {"jsonrpc":"2.0","id":2,"result":{"tools":[...]}}
 -> {"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"health_check","arguments":{}}}
-<- {"jsonrpc":"2.0","id":3,"result":{"content":[{"type":"text","text":"{\"status\":\"ok\",\"version\":\"v0.4.0\",\"storage_ok\":true,\"embedding_model_loaded\":true}"}],"isError":false}}
+<- {"jsonrpc":"2.0","id":3,"result":{"content":[{"type":"text","text":"{\"status\":\"ok\",\"version\":\"v0.7.0\",\"storage_ok\":true,\"embedding_model_loaded\":true}"}],"isError":false}}
 ```
 
 ---
@@ -239,7 +239,7 @@ Every MCP connection (stdio or HTTP) must follow this sequence:
     },
     "serverInfo": {
       "name": "mnemond",
-      "version": "0.4.0"
+      "version": "0.7.0"
     }
   }
 }
@@ -477,6 +477,11 @@ All search tools return a `results` array. Each result contains the fields avail
 #### search_hybrid
 
 The primary search tool. Runs vector similarity, keyword (BM25), and graph search in parallel, then fuses results using Reciprocal Rank Fusion (RRF). **This is the recommended search tool for most use cases.**
+
+**Search pipeline details:**
+- **Vector ranker**: Searches both whole-memory and per-chunk embeddings in the HNSW index. Long memories (>800 bytes) are automatically split into ~800-byte chunks at conversation turn boundaries, each with its own embedding. Chunk results are resolved to parent memory UUIDs (best-scoring chunk per parent wins). Query text is prefixed with `search_query:` for nomic-embed asymmetric retrieval.
+- **Keyword ranker**: Tiered FTS5 query strategy: AND (all non-stopword terms) → NEAR/10 (proximity) → OR (any term). Falls through tiers until results are found. 57 English stopwords filtered from AND/NEAR queries.
+- **Graph ranker**: Vector search over entity embeddings → BFS edge traversal to connected memories. Requires entities to have been embedded and linked via edges (e.g., via `extract_events` with `memory_id`).
 
 **Arguments:**
 
@@ -782,12 +787,20 @@ Get an entity with its edges and related entities, traversed to a configurable d
 
 ```json
 {
-  "content": [{"type": "text", "text": "{\"entity\":{\"id\":\"019...\",\"name\":\"Auth Service\",\"entity_type\":\"service\",\"observation_count\":3},\"edges_out\":[{\"id\":\"019...\",\"target_id\":\"019...\",\"edge_type\":\"depends_on\"}],\"edges_in\":[],\"related_entities\":[{\"id\":\"019...\",\"name\":\"PostgreSQL\",\"entity_type\":\"technology\"}]}"}],
+  "content": [{"type": "text", "text": "{\"depth\":2,\"nodes\":[{\"id\":\"019...\",\"name\":\"Auth Service\",\"entity_type\":\"service\",\"observation_count\":3,\"depth\":0},{\"id\":\"019...\",\"name\":\"PostgreSQL\",\"entity_type\":\"technology\",\"observation_count\":1,\"depth\":1}],\"edges\":[{\"id\":\"019...\",\"source_id\":\"019...\",\"target_id\":\"019...\",\"edge_type\":\"depends_on\"}]}"}],
   "isError": false
 }
 ```
 
-**Response field limits:** `edges_out` and `edges_in` capped at 100 each. `related_entities` capped at 50.
+**Response fields:**
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `depth` | integer | Traversal depth used. |
+| `nodes` | array | Entities discovered by BFS. Each includes `id`, `name`, `entity_type`, `observation_count`, and `depth` (hops from root). |
+| `edges` | array | All edges between visited entities. Each includes `id`, `source_id`, `target_id`, and `edge_type`. |
+
+**Response limits:** Max 200 nodes, max 500 edges.
 
 ---
 
@@ -902,7 +915,7 @@ Tools for extracting, searching, and computing durations between dated events fo
 
 #### extract_events
 
-Parse natural language dates from text and create event entities in the knowledge graph. Handles formats like "January 10th", "March 15, 2023", "Feb 27".
+Parse natural language dates from text and create event entities in the knowledge graph. Handles formats like "January 10th", "March 15, 2023", "Feb 27". Entities are embedded for vector search. When `memory_id` is provided, edges are created linking each entity back to the source memory, enabling the graph ranker to traverse from event entities to relevant memories.
 
 **Arguments:**
 
@@ -911,8 +924,9 @@ Parse natural language dates from text and create event entities in the knowledg
 | `content` | string | yes | | Text to extract events from. |
 | `context_year` | integer | no | 2023 | Default year for dates without an explicit year. |
 | `create_entities` | boolean | no | `true` | Create event entities in the knowledge graph. |
+| `memory_id` | string | no | | UUID of the source memory. When provided, creates `extracted_from` edges linking entities back to the memory, activating graph-based retrieval. |
 
-**Response fields:** `events` (array of `{description, event_date, entity_id}`), `extracted` (count), `entities_created` (count).
+**Response fields:** `events` (array of `{description, event_date, entity_id}`), `extracted` (count), `entities_created` (count), `edges_created` (count).
 
 #### search_events
 
@@ -1306,7 +1320,7 @@ Check that the daemon is running and storage is accessible.
 
 ```json
 {
-  "content": [{"type": "text", "text": "{\"status\":\"ok\",\"version\":\"v0.4.0\",\"storage_ok\":true,\"embedding_model_loaded\":true}"}],
+  "content": [{"type": "text", "text": "{\"status\":\"ok\",\"version\":\"v0.7.0\",\"storage_ok\":true,\"embedding_model_loaded\":true}"}],
   "isError": false
 }
 ```
@@ -1535,8 +1549,8 @@ Always check `isError` before parsing the `text` field as a successful result.
 | Recursive import depth | 16 levels | |
 | `prune_stale` candidates | 200 max per call | |
 | `get_entity_graph` depth | 5 max | Default: 2. |
-| Edges per entity (displayed) | 100 in/out | |
-| Related entities (displayed) | 50 | |
+| `get_entity_graph` nodes | 200 max | BFS traversal cap. |
+| `get_entity_graph` edges | 500 max | Across all visited nodes. |
 | Stdio line buffer | 1 MB | |
 | HTTP request body | 2 MB | |
 | Concurrent HTTP sessions | 256 | |
@@ -1604,7 +1618,7 @@ Always check `isError` before parsing the `text` field as a successful result.
 | 10 | `add_observation` | Entity Graph | Add observation to entity |
 | 11 | `create_relation` | Entity Graph | Create directed edge |
 | 12 | `search_entities` | Entity Graph | Search entities |
-| 13 | `get_entity_graph` | Entity Graph | Traverse entity with edges |
+| 13 | `get_entity_graph` | Entity Graph | BFS traversal of entity neighborhood |
 | 14 | `get_history` | Temporal | Entity version history |
 | 15 | `get_state_at_time` | Temporal | Entity snapshot at timestamp |
 | 16 | `get_changes_since` | Temporal | Change feed since timestamp |

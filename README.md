@@ -10,9 +10,9 @@ Every piece of data stays on your local filesystem. No API keys required for cor
 
 ## Key Features
 
-- **Hybrid Search** -- graph traversal + vector similarity + BM25 keyword search, fused via Reciprocal Rank Fusion (RRF). Three rankers run in parallel via persistent reader pool or ad-hoc pthreads.
+- **Hybrid Search** -- graph traversal + vector similarity + BM25 keyword search, fused via Reciprocal Rank Fusion (RRF). Three rankers run in parallel via persistent reader pool or ad-hoc pthreads. Tiered FTS queries (AND → NEAR → OR with stopword filtering). Chunked vector indexing splits long content into ~800-byte turn-aware passages for precise embedding.
 - **Bi-Temporal Knowledge Graph** -- every fact tracks when it was true (domain time) and when it was recorded (transaction time), with non-destructive updates
-- **Local Embeddings** -- llama.cpp in-process with nomic-embed-text-v1.5 (no external API)
+- **Local Embeddings** -- llama.cpp in-process with nomic-embed-text-v1.5 (no external API). Task-prefixed asymmetric retrieval (`search_document:`/`search_query:`). Bookend truncation for context overflow.
 - **Hardware-Aware** -- auto-detects AMD/NVIDIA/Intel GPU, AMD XDNA NPU, SIMD (AVX2/AVX-512), and NUMA at runtime
 - **Network MCP Server** -- Streamable HTTP transport (MCP 2025-03-26 spec) with TLS, Bearer auth, session management, SSE streaming, and Origin validation. Run one instance on a server, connect from any machine.
 - **Memory Lifecycle** -- multi-tier memory (episodic/semantic/procedural), Hebbian importance decay, episodic-to-semantic consolidation with automatic entity deduplication and merge
@@ -136,7 +136,7 @@ source ~/.bashrc
 ### Step 5: Verify the Install
 
 ```bash
-mnemond --version             # should print: mnemond v0.4.0 (...)
+mnemond --version             # should print: mnemond v0.7.0 (...)
 mnemond --check-config        # should print: Configuration is valid.
 ```
 
@@ -170,7 +170,7 @@ mnemond --warmup
 This loads the model, compiles GPU kernels, runs one test embedding, and exits. You'll see output like:
 
 ```
-2026-04-05T05:18:56Z [INFO] mnemond 0.4.0 starting
+2026-04-05T05:18:56Z [INFO] mnemond 0.7.0 starting
 2026-04-05T05:18:56Z [INFO] CPU: AMD RYZEN AI MAX+ 395 w/ Radeon 8060S (32 cores) SIMD: avx512
 2026-04-05T05:18:56Z [INFO] loading embedding model: ~/.local/share/mnemond/models/nomic-embed-text-v1.5.Q8_0.gguf
 2026-04-05T05:18:56Z [INFO] embedding model loaded: 768 dimensions
@@ -798,7 +798,7 @@ Same pattern -- point `command` at `mnemond-remote`:
 From any configured client, ask your AI tool to run `health_check`. It should return:
 
 ```json
-{"status": "ok", "version": "v0.4.0 (...)", "storage_ok": true}
+{"status": "ok", "version": "v0.7.0 (...)", "storage_ok": true}
 ```
 
 Or test directly:
@@ -895,6 +895,7 @@ max_memory_size_kb = 64               # per-memory content size limit
 - [MCP Reference](doc/MCP-REFERENCE.md) -- complete protocol, tools, and API reference (for developers and AI agents)
 - [Architecture](doc/ARCHITECTURE.md) -- full system design (v0.4, peer-reviewed)
 - [Benchmark Report](doc/BENCHMARK-REPORT.md) -- LongMemEval retrieval quality and performance analysis
+- [Retrieval Analysis](doc/RETRIEVAL-ANALYSIS.md) -- Root cause analysis of ranking quality at scale
 - [Research Synthesis](doc/research-synthesis.md) -- landscape analysis and academic survey
 - [Landscape Report](doc/memory-mcp-report-v2.md) -- practitioner guide to existing memory MCP servers
 - [Token Efficiency Guide](doc/claude-automation-efficiency-2026.pdf) -- Claude automation and token optimization strategies

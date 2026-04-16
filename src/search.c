@@ -92,7 +92,12 @@ typedef struct {
     mnemon_err_t          err;
 } ranker_arg_t;
 
-/* Vector ranker thread function */
+/* Vector ranker thread function.
+ *
+ * The memory vector index contains both whole-memory embeddings and
+ * per-chunk embeddings.  When a chunk UUID is returned, we resolve it
+ * to the parent memory UUID so the fusion table works with memory IDs.
+ * For multiple chunks from the same parent, keep the best (lowest rank). */
 static void *vector_ranker_fn(void *arg)
 {
     ranker_arg_t *ra = (ranker_arg_t *)arg;
@@ -107,17 +112,39 @@ static void *vector_ranker_fn(void *arg)
     ra->err = mnemon_vector_search(vec, ra->query_emb, ra->dimensions,
                                    MAX_RANKER_RESULTS, false, &vr);
     if (ra->err == MNEMON_OK && vr.count > 0) {
+        /* Open a read txn for chunk resolution */
+        mnemon_graph_t *graph = mnemon_storage_graph(ra->storage);
+        MDB_txn *txn = NULL;
+        mnemon_graph_txn_begin(graph, MDB_RDONLY, &txn);
+
         pthread_mutex_lock(ra->fusion_mutex);
         for (int i = 0; i < vr.count; i++) {
+            uint8_t resolved_id[16];
+            memcpy(resolved_id, vr.results[i].id, 16);
+
+            /* Check if this is a chunk UUID and resolve to parent */
+            if (txn) {
+                mnemon_chunk_meta_t cm;
+                if (mnemon_graph_get_chunk(graph, txn, vr.results[i].id,
+                                           &cm) == MNEMON_OK) {
+                    memcpy(resolved_id, cm.parent_id, 16);
+                }
+            }
+
             fusion_entry_t *fe = fusion_find_or_insert(
                 ra->fusion, ra->fusion_count, ra->fusion_capacity,
-                vr.results[i].id);
+                resolved_id);
             if (fe) {
-                fe->vector_rank = i + 1;
-                fe->vector_score = 1.0f - vr.results[i].distance;
+                /* Keep the best rank (lowest i) for this parent */
+                if (fe->vector_rank == 0 || i + 1 < fe->vector_rank) {
+                    fe->vector_rank = i + 1;
+                    fe->vector_score = 1.0f - vr.results[i].distance;
+                }
             }
         }
         pthread_mutex_unlock(ra->fusion_mutex);
+
+        if (txn) mnemon_graph_txn_abort(txn);
         mnemon_vector_results_free(&vr);
     }
     return NULL;
@@ -299,7 +326,7 @@ mnemon_err_t mnemon_search_hybrid(mnemon_storage_t *s,
         if (!query_emb)
             return MNEMON_ERR_OOM;
         err = mnemon_embed_text(embed, q->query_text, strlen(q->query_text),
-                                query_emb, dimensions);
+                                query_emb, dimensions, true);
         if (err != MNEMON_OK) {
             free(query_emb);
             query_emb = NULL;
@@ -437,7 +464,7 @@ mnemon_err_t mnemon_search_semantic(mnemon_storage_t *s,
         if (!query_emb)
             return MNEMON_ERR_OOM;
         err = mnemon_embed_text(embed, q->query_text, strlen(q->query_text),
-                                query_emb, dimensions);
+                                query_emb, dimensions, true);
         if (err != MNEMON_OK) {
             free(query_emb);
             return err;

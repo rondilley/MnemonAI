@@ -499,15 +499,16 @@ static void test_create_relation(void)
 
 static void test_get_entity_graph(void)
 {
-    TEST("[TOOL] get_entity_graph: entity + edges + related");
+    TEST("[TOOL] get_entity_graph: BFS nodes + edges with depth");
     cJSON *args = cJSON_CreateObject();
     cJSON_AddStringToObject(args, "entity_id", stored_entity_a);
     cJSON_AddNumberToObject(args, "depth", 2);
     cJSON *r = call_tool("get_entity_graph", args, 240);
     ASSERT(r != NULL, "result");
-    ASSERT(cJSON_IsObject(cJSON_GetObjectItemCaseSensitive(r, "entity")), "entity");
-    ASSERT(cJSON_IsArray(cJSON_GetObjectItemCaseSensitive(r, "edges_out")), "edges_out");
-    ASSERT(cJSON_IsArray(cJSON_GetObjectItemCaseSensitive(r, "related_entities")), "related");
+    ASSERT(cJSON_GetObjectItemCaseSensitive(r, "depth")->valueint == 2, "depth=2");
+    ASSERT(cJSON_IsArray(cJSON_GetObjectItemCaseSensitive(r, "nodes")), "nodes");
+    ASSERT(cJSON_GetArraySize(cJSON_GetObjectItemCaseSensitive(r, "nodes")) >= 1, "nodes>=1");
+    ASSERT(cJSON_IsArray(cJSON_GetObjectItemCaseSensitive(r, "edges")), "edges");
     cJSON_Delete(r);
     PASS();
 }

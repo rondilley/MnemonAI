@@ -205,7 +205,8 @@ void mnemon_embed_free(mnemon_embed_t *e)
 }
 
 mnemon_err_t mnemon_embed_text(mnemon_embed_t *e, const char *text,
-                               size_t text_len, float *out, int dimensions)
+                               size_t text_len, float *out, int dimensions,
+                               bool is_query)
 {
     int n_tokens;
     int32_t max_tokens;
@@ -220,21 +221,58 @@ mnemon_err_t mnemon_embed_text(mnemon_embed_t *e, const char *text,
         return MNEMON_ERR_EMBED;
     }
 
+    /* nomic-embed-text-v1.5 uses task prefixes for asymmetric retrieval.
+     * Documents get "search_document: " prefix, queries get "search_query: ".
+     * This significantly improves retrieval quality for short-query-long-doc. */
+    const char *prefix = is_query ? "search_query: " : "search_document: ";
+    size_t prefix_len = strlen(prefix);
+    size_t prefixed_len = prefix_len + text_len;
+    char *prefixed = malloc(prefixed_len + 1);
+    if (!prefixed) return MNEMON_ERR_OOM;
+    memcpy(prefixed, prefix, prefix_len);
+    memcpy(prefixed + prefix_len, text, text_len);
+    prefixed[prefixed_len] = '\0';
+
     /* Tokenize */
     max_tokens = llama_n_ctx(e->ctx);
     llama_token *tokens = malloc((size_t)max_tokens * sizeof(llama_token));
-    if (!tokens) return MNEMON_ERR_OOM;
+    if (!tokens) { free(prefixed); return MNEMON_ERR_OOM; }
 
-    n_tokens = llama_tokenize(llama_model_get_vocab(e->model), text,
-                              (int32_t)text_len, tokens, max_tokens,
+    n_tokens = llama_tokenize(llama_model_get_vocab(e->model), prefixed,
+                              (int32_t)prefixed_len, tokens, max_tokens,
                               true, false);
+
+    /* If text exceeds context, use bookend strategy: keep the first half
+     * and last half of tokens so both beginning and end of the document
+     * contribute to the embedding. Silently truncated middle content is
+     * typically less distinctive than opening/closing content. */
     if (n_tokens < 0) {
-        mnemon_err_set(MNEMON_ERR_EMBED, 0,
-                       "text exceeds embedding context (%zu chars, "
-                       "%d token limit)", text_len, max_tokens);
-        free(tokens);
-        return MNEMON_ERR_EMBED;
+        int32_t needed = -n_tokens;
+        llama_token *full = malloc((size_t)needed * sizeof(llama_token));
+        if (!full) { free(tokens); free(prefixed); return MNEMON_ERR_OOM; }
+        int full_count = llama_tokenize(llama_model_get_vocab(e->model),
+                                        prefixed, (int32_t)prefixed_len,
+                                        full, needed, true, false);
+        if (full_count <= 0) {
+            free(full); free(tokens); free(prefixed);
+            return MNEMON_ERR_EMBED;
+        }
+        /* Bookend: first half_size tokens + last half_size tokens */
+        int half = max_tokens / 2;
+        int tail_start = full_count - half;
+        if (tail_start <= half) {
+            /* Overlap — just take the first max_tokens */
+            memcpy(tokens, full, (size_t)max_tokens * sizeof(llama_token));
+        } else {
+            memcpy(tokens, full, (size_t)half * sizeof(llama_token));
+            memcpy(tokens + half, full + tail_start,
+                   (size_t)half * sizeof(llama_token));
+        }
+        n_tokens = max_tokens;
+        free(full);
     }
+
+    free(prefixed);
 
     /* Build batch -- llama_batch_init allocates seq_id[i] arrays internally,
      * so write into them rather than replacing the pointers (which would
@@ -292,7 +330,8 @@ mnemon_err_t mnemon_embed_batch(mnemon_embed_t *e, const char **texts,
         /* Sequential fallback for trivial or very large batches */
         for (size_t i = 0; i < count; i++) {
             mnemon_err_t err = mnemon_embed_text(e, texts[i], text_lens[i],
-                                    out + (i * (size_t)dimensions), dimensions);
+                                    out + (i * (size_t)dimensions), dimensions,
+                                    false);
             if (err != MNEMON_OK) return err;
         }
         return MNEMON_OK;
@@ -333,7 +372,8 @@ mnemon_err_t mnemon_embed_batch(mnemon_embed_t *e, const char **texts,
             free(all_tokens); free(token_counts); free(token_offsets);
             for (size_t j = 0; j < count; j++) {
                 mnemon_err_t err = mnemon_embed_text(e, texts[j], text_lens[j],
-                                        out + (j * (size_t)dimensions), dimensions);
+                                        out + (j * (size_t)dimensions), dimensions,
+                                        false);
                 if (err != MNEMON_OK) return err;
             }
             return MNEMON_OK;
@@ -366,7 +406,8 @@ mnemon_err_t mnemon_embed_batch(mnemon_embed_t *e, const char **texts,
         /* Fall back to sequential on decode failure */
         for (size_t i = 0; i < count; i++) {
             mnemon_err_t err = mnemon_embed_text(e, texts[i], text_lens[i],
-                                    out + (i * (size_t)dimensions), dimensions);
+                                    out + (i * (size_t)dimensions), dimensions,
+                                    false);
             if (err != MNEMON_OK) return err;
         }
         return MNEMON_OK;

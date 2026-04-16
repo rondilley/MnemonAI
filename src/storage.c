@@ -206,6 +206,126 @@ void mnemon_storage_close(mnemon_storage_t *s)
     free(s);
 }
 
+/* ------------------------------------------------------------------ */
+/* Chunked vector indexing                                             */
+/* ------------------------------------------------------------------ */
+
+/* Minimum content length to trigger chunking.  Short memories get a
+ * single whole-memory embedding which is already effective. */
+#define CHUNK_MIN_CONTENT  800
+
+/* Target chunk size in bytes.  Chosen so each chunk tokenizes well
+ * within the 2048-token context of nomic-embed-text-v1.5. */
+#define CHUNK_TARGET_SIZE  800
+
+/* Split content into chunks at conversation turn boundaries.
+ * Returns number of chunks written into out[] (caller-allocated).
+ * Each chunk stores byte_offset and byte_length into the original content. */
+static int chunk_text(const char *content, size_t content_len,
+                      mnemon_chunk_meta_t *out, int max_chunks)
+{
+    int n = 0;
+    size_t pos = 0;
+
+    while (pos < content_len && n < max_chunks) {
+        /* Find the end of this chunk: look for a turn boundary near the
+         * target size, or split at the target if no boundary found. */
+        size_t end = pos + CHUNK_TARGET_SIZE;
+        if (end >= content_len) {
+            end = content_len;
+        } else {
+            /* Look for a turn boundary ("\nUser: " or "\nAssistant: ")
+             * in the region [target-200 .. target+200] */
+            size_t search_start = end > 200 ? end - 200 : pos;
+            size_t search_end = end + 200;
+            if (search_end > content_len) search_end = content_len;
+            size_t best = 0;
+            for (size_t i = search_start; i < search_end; i++) {
+                if (content[i] == '\n') {
+                    if (i + 6 < content_len &&
+                        memcmp(content + i + 1, "User:", 5) == 0) {
+                        best = i + 1;  /* split before "User:" */
+                        break;
+                    }
+                    if (i + 11 < content_len &&
+                        memcmp(content + i + 1, "Assistant:", 10) == 0) {
+                        best = i + 1;
+                        break;
+                    }
+                }
+            }
+            if (best > pos)
+                end = best;
+        }
+
+        /* Skip empty chunks */
+        if (end > pos) {
+            memset(&out[n], 0, sizeof(out[n]));
+            out[n].sequence = (uint32_t)n;
+            out[n].byte_offset = (uint32_t)pos;
+            out[n].byte_length = (uint32_t)(end - pos);
+            n++;
+        }
+        pos = end;
+    }
+    return n;
+}
+
+/* Store chunk embeddings for a memory.  Called after the memory itself
+ * is stored.  Generates one embedding per chunk and stores:
+ *   - Chunk metadata in LMDB (chunk_uuid -> parent_uuid + offset)
+ *   - Chunk embedding in the memory vector index */
+static void store_chunks(mnemon_storage_t *s, const mnemon_memory_t *mem)
+{
+    mnemon_embed_t *embed = s->embed;
+    if (!embed || !mnemon_embed_available(embed))
+        return;
+    if (!mem->content)
+        return;
+
+    size_t content_len = strlen(mem->content);
+    if (content_len < CHUNK_MIN_CONTENT)
+        return;
+
+    int dims = mnemon_embed_dimensions(embed);
+    mnemon_chunk_meta_t chunks[128];
+    int nchunks = chunk_text(mem->content, content_len, chunks, 128);
+    if (nchunks <= 1)
+        return;  /* single chunk = whole memory embedding is sufficient */
+
+    float *emb = malloc((size_t)dims * sizeof(float));
+    if (!emb) return;
+
+    for (int i = 0; i < nchunks; i++) {
+        /* Generate chunk UUID */
+        mnemon_uuid_t cu;
+        mnemon_uuid_generate(&cu);
+        memcpy(chunks[i].id, cu.bytes, 16);
+        memcpy(chunks[i].parent_id, mem->id, 16);
+
+        /* Embed the chunk text */
+        const char *chunk_start = mem->content + chunks[i].byte_offset;
+        size_t chunk_len = chunks[i].byte_length;
+        if (mnemon_embed_text(embed, chunk_start, chunk_len,
+                              emb, dims, false) != MNEMON_OK)
+            continue;
+
+        /* Store chunk metadata in LMDB */
+        MDB_txn *txn;
+        if (mnemon_graph_txn_begin(s->graph, 0, &txn) == MNEMON_OK) {
+            if (mnemon_graph_put_chunk(s->graph, txn, &chunks[i]) == MNEMON_OK)
+                mnemon_graph_txn_commit(txn);
+            else
+                mnemon_graph_txn_abort(txn);
+        }
+
+        /* Store chunk embedding in vector index */
+        mnemon_vector_add(s->vector, chunks[i].id, emb, dims, false);
+    }
+
+    free(emb);
+}
+
 /*
  * Store a memory through the 5-step write sequence:
  *   1. Write intent
@@ -281,6 +401,9 @@ mnemon_err_t mnemon_store_memory(mnemon_storage_t *s, mnemon_memory_t *mem)
                        mnemon_err_msg());
         }
     }
+
+    /* Step 4b: Store chunk embeddings for long content */
+    store_chunks(s, mem);
 
     /* Step 5: Delete intent (all steps complete) */
     err = mnemon_graph_txn_begin(s->graph, 0, &txn);
