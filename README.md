@@ -58,7 +58,11 @@ graph TB
 ## Numbers
 
 - 35 MCP tools, 12,500+ lines of C, 343 tests
-- Store: 417 ops/sec, Retrieve: 10us, Search: 530us (at 1K memories)
+- Hybrid search (with GPU embedding) at 1M memories, single client: p50 18ms, p95 22ms, p99 24ms
+- Hybrid search at 1M + 10 concurrent clients (realistic AI-agent profile): p50 47ms, p99 104ms
+- Store throughput (GPU-embedded): ~140 ops/sec sustained through 1M corpus -- backfill of ~100K items in ~12 min
+- Memory footprint: ~7.5KB/memory RAM (768-dim embedding + indexes). 1M memories fits in ~8GB
+- Saturation ceiling: ~69 ops/sec hybrid, ~95 ops/sec keyword-only (well above the <=10 concurrent design profile)
 - LongMemEval benchmark: 100% R@5 oracle, 27.6% R@5 at 19K corpus ([details](doc/BENCHMARK-REPORT.md))
 
 See [doc/ARCHITECTURE.md](doc/ARCHITECTURE.md) for the full architecture document.

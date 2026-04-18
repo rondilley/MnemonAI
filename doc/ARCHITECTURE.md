@@ -1748,19 +1748,65 @@ These were open during the initial draft. All resolved as of 2026-04-03.
 | test_storage | 24 | Full-field round-trip, 10KB content, unicode, tags, bulk 50, delete+FTS, delete entity, edges_to, rebuild indexes, replay intents, storage accessors |
 | test_mcp_client.py | 105 | All 35 tools end-to-end over stdio, MCP spec conformance, schema validation |
 | test_mcp_http.py | 42 | All 35 tools over HTTP, auth, sessions, CORS |
-| test_mcp_perf.py | -- | Latency/throughput at 100/1000 memory scale |
+| test_mcp_perf.py | -- | DEPRECATED: valgrind-wrapped, no embedding, <=1K scale |
+| test_perf_native.py | -- | Native perf harness: scale + concurrency sweeps, RSS sampling, realistic mix |
 | **Total** | **343** | |
 
-### 16.2 Performance Benchmarks (AMD Ryzen AI MAX+ 395, 32 cores)
+### 16.2 Performance Benchmarks (AMD Ryzen AI MAX+ 395, 64GB UMA, Radeon 8060S gfx1151, ROCm 7.2.1)
 
-| Operation | 100 memories | 1,000 memories |
-|-----------|-------------|----------------|
-| store p50 | 2.38ms | 2.29ms |
-| store p95 | 2.87ms | 2.67ms |
-| store throughput | 411 ops/sec | 417 ops/sec |
-| retrieve p50 | 10us | 10us |
-| keyword search p50 | 120us | 530us |
-| stats query | 20us | 30us |
+Measured 2026-04-17 with `test/test_perf_native.py` over HTTP transport with GPU-accelerated embedding (`nomic-embed-text-v1.5` Q8_0). Single-connection urllib client; workload is a weighted mix (5% store / 10% retrieve / 85% search).
+
+#### Scale axis: single-client search_hybrid latency vs corpus size
+
+| Corpus | p50 | p95 | p99 | max |
+|--------|-----|-----|-----|-----|
+| 100K | 7.5ms | 8.3ms | 9.1ms | 15.0ms |
+| 500K | 12.4ms | 14.6ms | 15.3ms | 52.2ms |
+| 1M | 18.3ms | 21.7ms | 24.0ms | 83.9ms |
+
+**Scaling:** 10x corpus (100K -> 1M) produces 2.4x p50 latency. Consistent with HNSW's O(log N) characteristic. No degradation knee found in the tested range.
+
+#### Concurrency axis: search_hybrid latency at 1M corpus, varying concurrent clients
+
+| Clients | Throughput | p50 | p95 | p99 |
+|---------|------------|-----|-----|-----|
+| 1  | 2.0 ops/s  | 19ms  | 25ms  | 36ms |
+| 5  | 10.1 ops/s | 45ms  | 72ms  | 89ms |
+| 10 | 20.1 ops/s | 47ms  | 87ms  | 104ms |
+| 20 | 40.1 ops/s | 82ms  | 214ms | 240ms |
+| 50 | 69.2 ops/s | 722ms | 788ms | 812ms |
+| 100 | 68.8 ops/s | 1449ms | 1564ms | 1599ms |
+
+**Knee between 20 and 50 concurrent clients.** Throughput saturates at ~69 ops/sec for hybrid search (~95 ops/sec for keyword-only).
+
+#### Ingest throughput (GPU-embedded stores)
+
+| Corpus range | Rate | Notes |
+|--------------|------|-------|
+| 0 -> 100K | 146 ops/sec | Fresh HNSW |
+| 100K -> 500K | 141 ops/sec | HNSW insertion marginally slower |
+| 500K -> 1M | 138 ops/sec | <6% degradation vs fresh |
+
+Backfill of ~100K items completes in ~12 minutes; 1M items in ~2 hours.
+
+#### Memory footprint
+
+- RSS at 1M memories (cold-built from ingest): 7.75GB
+- RSS at 1M memories (memory-mapped on restart): 4.23GB
+- Per-memory RAM cost: ~7.5KB built / ~4.2KB memory-mapped
+- 64GB host accommodates ~8M memories (built) or ~14M (memory-mapped)
+
+#### Bottleneck analysis
+
+Reader pool size sweep (4/8/16/32) showed **no impact** on the concurrency ceiling. The knee is not thread-pool-bound.
+
+Disabling the embedding model (`--no-embedding`, forces keyword-only path) lifts the ceiling from 69 -> 95 ops/sec (+38%). GPU embedding is part of the cost but not the dominant factor.
+
+The remaining ceiling (~95 ops/sec without GPU) aligns with ~10ms single-threaded FTS5 service time (1/0.010 = 100 qps). Prime suspect: SQLite connection sharing on the FTS5 read path. Investigation deferred -- not a binding constraint for the design profile (<=10 concurrent clients).
+
+#### Design-profile verdict
+
+For the target deployment profile (<=10 concurrent AI-agent clients, <=1M memories), p99 stays under 110ms on hybrid search. The system has substantial headroom above the expected workload.
 
 ### 16.3 LongMemEval Benchmark (2026-04-08)
 
