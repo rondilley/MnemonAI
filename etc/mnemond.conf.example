@@ -64,6 +64,20 @@ enabled = false
 bind = 127.0.0.1
 port = 3847
 max_connections = 32
+connection_timeout = 120            # Seconds of idle before MHD reaps a connection.
+                                    # 0 = no timeout (NOT recommended -- dead clients
+                                    # can leak connections until max_connections fills).
+                                    # SO_KEEPALIVE is also enabled per-socket so the
+                                    # kernel detects half-open peers within ~2 minutes.
+per_ip_connection_limit = 0         # Max concurrent connections per client IP.
+                                    # 0 = unlimited. Set to e.g. 8 to prevent a single
+                                    # misbehaving client from consuming the whole pool.
 auth_token =                        # Optional Bearer token for HTTP auth
 allow_ips =                         # Comma-separated CIDR allow list (empty = allow all)
                                     # Example: 192.168.1.0/24, 10.0.0.5, 172.16.0.0/12
+
+[diag]
+heartbeat_secs = 0                  # 0 = disabled. Set e.g. 60 to log
+                                    # connection / in-flight / reader-pool gauges
+                                    # at INFO every N seconds. Use SIGUSR1 for
+                                    # an on-demand dump regardless of this setting.

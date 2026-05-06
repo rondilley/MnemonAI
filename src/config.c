@@ -84,9 +84,12 @@ static void set_defaults(mnemon_config_t *cfg)
     cfg->http_bind = strdup("127.0.0.1");
     cfg->http_port = 3847;
     cfg->http_max_connections = 32;
+    cfg->http_connection_timeout = 120;
+    cfg->http_per_ip_connection_limit = 0;
     cfg->http_auth_token = NULL;
     cfg->tls_cert = NULL;
     cfg->tls_key = NULL;
+    cfg->diag_heartbeat_secs = 0;
 }
 
 static void set_value(mnemon_config_t *cfg, const char *section,
@@ -148,6 +151,8 @@ static void set_value(mnemon_config_t *cfg, const char *section,
         else if (strcmp(key, "bind") == 0) { free(cfg->http_bind); cfg->http_bind = strdup(value); }
         else if (strcmp(key, "port") == 0) INT_SET(http_port);
         else if (strcmp(key, "max_connections") == 0) INT_SET(http_max_connections);
+        else if (strcmp(key, "connection_timeout") == 0) INT_SET(http_connection_timeout);
+        else if (strcmp(key, "per_ip_connection_limit") == 0) INT_SET(http_per_ip_connection_limit);
         else if (strcmp(key, "auth_token") == 0 && strlen(value) > 0) {
             free(cfg->http_auth_token);
             cfg->http_auth_token = strdup(value);
@@ -158,6 +163,8 @@ static void set_value(mnemon_config_t *cfg, const char *section,
         }
         else if (strcmp(key, "tls_cert") == 0) STR_SET(tls_cert);
         else if (strcmp(key, "tls_key") == 0) STR_SET(tls_key);
+    } else if (strcmp(section, "diag") == 0) {
+        if (strcmp(key, "heartbeat_secs") == 0) INT_SET(diag_heartbeat_secs);
     }
 
     #undef STR_SET
@@ -264,6 +271,17 @@ mnemon_err_t mnemon_config_validate(const mnemon_config_t *cfg)
     if ((cfg->tls_cert && !cfg->tls_key) || (!cfg->tls_cert && cfg->tls_key)) {
         mnemon_err_set(MNEMON_ERR_INVALID_INPUT, 0,
                        "tls_cert and tls_key must both be set or both unset");
+        return MNEMON_ERR_INVALID_INPUT;
+    }
+    if (cfg->http_connection_timeout < 0 || cfg->http_connection_timeout > 86400) {
+        mnemon_err_set(MNEMON_ERR_INVALID_INPUT, 0,
+                       "http connection_timeout must be 0-86400 seconds");
+        return MNEMON_ERR_INVALID_INPUT;
+    }
+    if (cfg->http_per_ip_connection_limit < 0 ||
+        cfg->http_per_ip_connection_limit > 65535) {
+        mnemon_err_set(MNEMON_ERR_INVALID_INPUT, 0,
+                       "http per_ip_connection_limit must be 0-65535");
         return MNEMON_ERR_INVALID_INPUT;
     }
     return MNEMON_OK;

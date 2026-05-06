@@ -1162,7 +1162,7 @@ graph TD
 | SIGTERM (3rd) | Immediate `_exit(128 + sig)` -- emergency escape |
 | SIGINT | Same as SIGTERM |
 | SIGHUP | Reload configuration (re-read INI file, apply safe changes: log level, consolidation params, decay params. Does NOT change data_dir or reopen storage.) |
-| SIGUSR1 | Dump stats to log at INFO level |
+| SIGUSR1 | Dump stats to log at INFO level: storage counts, plus HTTP runtime gauges (sessions, open TCP connections vs. `max_connections`, in-flight requests, lifetime total / slow / rejected counters) and reader-pool depth (size / busy / queued) |
 | SIGPIPE | Ignored (SIG_IGN) -- stdio write failures handled at application level |
 | SIGKILL | Kernel kills immediately (always works, not catchable) |
 
@@ -1679,8 +1679,48 @@ enabled = false
 bind = 127.0.0.1
 port = 3847
 max_connections = 32
+connection_timeout = 120            # Seconds idle before MHD reaps a connection
+                                    # (0 = no timeout; not recommended).
+per_ip_connection_limit = 0         # Concurrent connections allowed per client IP
+                                    # (0 = unlimited).
 auth_token =                        # Required if bind != 127.0.0.1; static Bearer token
+
+[diag]
+heartbeat_secs = 0                  # 0 = disabled; N>0 logs HTTP + reader-pool gauges every N seconds
 ```
+
+#### Diagnostic Logging
+
+Beyond SIGUSR1, the HTTP transport emits per-request observability:
+
+- Every request logs a completion line at DEBUG with `method`, `tool`, `ip`,
+  `duration_ms`, `in_flight_after`, and the MHD termination code.
+- Requests >= 1 s upgrade to WARNING and increment a `slow_requests` counter
+  (visible via SIGUSR1 / heartbeat).
+- Requests terminated abnormally (client abort, error mid-stream) log at WARNING.
+- The TCP connection gauge logs WARNING when crossing 75 / 90 / 100 % of
+  `max_connections`, throttled to once per 60 s per threshold.
+- `[diag] heartbeat_secs` enables a background thread that emits the SIGUSR1
+  gauges at INFO every N seconds for post-mortem visibility.
+
+#### Connection Lifecycle
+
+The HTTP transport does not rely on libmicrohttpd defaults for connection
+reaping; both layers below are configured explicitly:
+
+- **`MHD_OPTION_CONNECTION_TIMEOUT`** (`[http] connection_timeout`, default 120 s)
+  reaps idle HTTP keep-alive connections at the application layer. Setting
+  this to 0 disables the timeout but is not recommended -- without it, dead
+  client connections accumulate until `max_connections` fills.
+- **`SO_KEEPALIVE` + `TCP_KEEPIDLE=60` / `KEEPINTVL=15` / `KEEPCNT=4`** are
+  set on every accepted socket via the `MHD_OPTION_NOTIFY_CONNECTION` callback.
+  This makes the kernel detect truly dead peers (process crash, NAT mapping
+  rotation, route flap, laptop sleep) within ~120 s, instead of waiting for
+  the Linux default `tcp_keepalive_time` of 7200 s. Important for long-running
+  SSE streams that the application-layer idle timeout would not protect.
+- **`MHD_OPTION_PER_IP_CONNECTION_LIMIT`** (`[http] per_ip_connection_limit`,
+  default 0 = unlimited) caps concurrent connections per client IP, providing
+  a per-client circuit breaker independent of the global `max_connections`.
 
 ### 12.3 Config Search Path
 

@@ -30,9 +30,12 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdatomic.h>
+#include <inttypes.h>
 #include <pthread.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
+#include <netinet/tcp.h>
 #include <arpa/inet.h>
 #include <microhttpd.h>
 
@@ -49,6 +52,8 @@
 
 #define MAX_SESSIONS 256
 #define MAX_POST_SIZE (2 * 1024 * 1024) /* 2MB max request body */
+#define SLOW_REQUEST_MS 1000
+#define CONN_WARN_COOLDOWN_MS 60000
 
 /* ---- Session management ---- */
 
@@ -79,14 +84,31 @@ struct mnemon_http {
     mnemon_honeypot_t  *honeypot;      /* Abuse detection (may be NULL) */
     cidr_entry_t       *allow_list;    /* parsed CIDR entries (NULL = allow all) */
     int                 allow_count;
+    int                 max_connections;
+
+    /* Diagnostic gauges (lock-free) */
+    atomic_int          open_connections;
+    atomic_int          in_flight_requests;
+    atomic_uint_fast64_t total_requests;
+    atomic_uint_fast64_t slow_requests;
+    atomic_uint_fast64_t rejected_connections;
+    atomic_int_fast64_t  last_conn_warn_ms;  /* throttles near-limit warnings */
+    int                 last_warn_pct;       /* highest pct already warned */
 };
 
-/* Per-request upload accumulator */
+/* Per-request lifecycle + POST upload buffer */
 typedef struct {
+    /* Upload accumulator (POST only) */
     char   *data;
     size_t  len;
     size_t  cap;
-} upload_buf_t;
+    /* Lifecycle */
+    int64_t  started_ms;
+    char     method[12];
+    char     ip[48];
+    char     tool_name[64];     /* set by handle_post when known */
+    bool     in_flight_counted; /* did we increment in_flight_requests? */
+} request_state_t;
 
 /* ---- Session helpers ---- */
 
@@ -316,13 +338,13 @@ static enum MHD_Result respond_error(struct MHD_Connection *conn,
 
 static enum MHD_Result handle_post(mnemon_http_t *h,
                                     struct MHD_Connection *conn,
-                                    upload_buf_t *upload)
+                                    request_state_t *rs)
 {
-    if (!upload->data || upload->len == 0)
+    if (!rs->data || rs->len == 0)
         return respond_error(conn, MHD_HTTP_BAD_REQUEST, "empty body");
 
     /* Parse JSON-RPC */
-    cJSON *request = cJSON_Parse(upload->data);
+    cJSON *request = cJSON_Parse(rs->data);
     if (!request)
         return respond_error(conn, MHD_HTTP_BAD_REQUEST, "invalid JSON");
 
@@ -330,6 +352,19 @@ static enum MHD_Result handle_post(mnemon_http_t *h,
     const cJSON *method = cJSON_GetObjectItemCaseSensitive(request, "method");
     bool is_init = (cJSON_IsString(method) &&
                     strcmp(method->valuestring, "initialize") == 0);
+
+    /* Capture tool name for completion logging when this is tools/call */
+    if (cJSON_IsString(method) && strcmp(method->valuestring, "tools/call") == 0) {
+        const cJSON *params = cJSON_GetObjectItemCaseSensitive(request, "params");
+        const cJSON *name_item = params
+            ? cJSON_GetObjectItemCaseSensitive(params, "name") : NULL;
+        if (cJSON_IsString(name_item))
+            snprintf(rs->tool_name, sizeof(rs->tool_name), "%s",
+                     name_item->valuestring);
+    } else if (cJSON_IsString(method)) {
+        snprintf(rs->tool_name, sizeof(rs->tool_name), "%s",
+                 method->valuestring);
+    }
 
     /* Get or validate session */
     const char *session_id = MHD_lookup_connection_value(
@@ -540,6 +575,80 @@ static enum MHD_Result handle_get(mnemon_http_t *h,
     return ret;
 }
 
+/* ---- Connection-level notify callback (TCP open/close) ---- */
+
+/* Enable TCP keepalive on an accepted socket so the kernel detects dead peers
+ * (client crashed, NAT mapping rotated, route flap) within ~2 minutes instead
+ * of the default ~2 hours. Also acts as belt-and-suspenders alongside the
+ * MHD idle timeout: keepalive catches half-open TCP, the MHD timeout catches
+ * idle-but-live HTTP keep-alive sockets. */
+static void enable_tcp_keepalive(struct MHD_Connection *conn)
+{
+    const union MHD_ConnectionInfo *ci =
+        MHD_get_connection_info(conn, MHD_CONNECTION_INFO_CONNECTION_FD);
+    if (!ci) return;
+    int fd = ci->connect_fd;
+    if (fd < 0) return;
+
+    int on = 1;
+    if (setsockopt(fd, SOL_SOCKET, SO_KEEPALIVE, &on, sizeof(on)) < 0)
+        return;  /* not fatal -- MHD timeout still applies */
+
+#ifdef TCP_KEEPIDLE
+    int idle = 60;     /* start probing after 60s of idle */
+    setsockopt(fd, IPPROTO_TCP, TCP_KEEPIDLE, &idle, sizeof(idle));
+#endif
+#ifdef TCP_KEEPINTVL
+    int intvl = 15;    /* probe every 15s */
+    setsockopt(fd, IPPROTO_TCP, TCP_KEEPINTVL, &intvl, sizeof(intvl));
+#endif
+#ifdef TCP_KEEPCNT
+    int cnt = 4;       /* drop after 4 missed probes (60 + 4*15 = ~120s) */
+    setsockopt(fd, IPPROTO_TCP, TCP_KEEPCNT, &cnt, sizeof(cnt));
+#endif
+}
+
+static void notify_connection_cb(void *cls, struct MHD_Connection *conn,
+                                 void **socket_context,
+                                 enum MHD_ConnectionNotificationCode toe)
+{
+    mnemon_http_t *h = (mnemon_http_t *)cls;
+    (void)socket_context;
+    if (!h) return;
+
+    if (toe == MHD_CONNECTION_NOTIFY_STARTED) {
+        enable_tcp_keepalive(conn);
+        int now = atomic_fetch_add(&h->open_connections, 1) + 1;
+        int max = h->max_connections;
+        if (max > 0) {
+            int pct = (int)((int64_t)now * 100 / max);
+            int64_t now_ms = mnemon_time_ms();
+            int64_t last = atomic_load(&h->last_conn_warn_ms);
+            /* Warn when crossing 75/90/100% thresholds, throttled */
+            int threshold = 0;
+            if (pct >= 100)      threshold = 100;
+            else if (pct >= 90)  threshold = 90;
+            else if (pct >= 75)  threshold = 75;
+            if (threshold && (threshold > h->last_warn_pct ||
+                              now_ms - last > CONN_WARN_COOLDOWN_MS)) {
+                mnemon_log(MNEMON_LOG_WARNING,
+                    "HTTP: connections at %d/%d (%d%%) -- nearing max_connections",
+                    now, max, pct);
+                atomic_store(&h->last_conn_warn_ms, now_ms);
+                h->last_warn_pct = threshold;
+            }
+        }
+    } else if (toe == MHD_CONNECTION_NOTIFY_CLOSED) {
+        int now = atomic_fetch_sub(&h->open_connections, 1) - 1;
+        if (now < 0) {
+            /* Should not happen; clamp and log once */
+            atomic_store(&h->open_connections, 0);
+        }
+        if (h->max_connections > 0 && now * 4 < h->max_connections * 3)
+            h->last_warn_pct = 0;  /* below 75% again -- re-arm warnings */
+    }
+}
+
 /* ---- Main request handler (libmicrohttpd callback) ---- */
 
 static enum MHD_Result request_handler(void *cls,
@@ -554,88 +663,78 @@ static enum MHD_Result request_handler(void *cls,
     mnemon_http_t *h = (mnemon_http_t *)cls;
     (void)version;
 
-    /* CORS preflight */
-    if (strcmp(method, "OPTIONS") == 0)
-        return handle_options(conn);
+    request_state_t *rs = (request_state_t *)*con_cls;
 
-    /* Validate endpoint path */
-    if (strcmp(url, h->mcp_path) != 0)
-        return respond_error(conn, MHD_HTTP_NOT_FOUND, "not found");
+    /* First call: validate, then allocate request state. We must validate
+     * BEFORE returning MHD_YES on POST -- queuing a response after MHD has
+     * begun delivering upload_data is undefined. */
+    if (!rs) {
+        if (strcmp(method, "OPTIONS") == 0)
+            return handle_options(conn);
 
-    /* IP allow list check (before auth, so denied IPs never reach auth) */
-    if (!check_ip_allowed(h, conn)) {
-        const char *ip = get_client_ip(conn);
-        mnemon_log(MNEMON_LOG_WARNING,
-                   "HTTP: denied connection from %s (not in allow_ips)",
-                   ip ? ip : "unknown");
-        return respond_error(conn, MHD_HTTP_FORBIDDEN, "ip not allowed");
+        if (strcmp(url, h->mcp_path) != 0)
+            return respond_error(conn, MHD_HTTP_NOT_FOUND, "not found");
+
+        if (!check_ip_allowed(h, conn)) {
+            mnemon_log(MNEMON_LOG_WARNING,
+                       "HTTP: denied connection from %s (not in allow_ips)",
+                       get_client_ip(conn));
+            return respond_error(conn, MHD_HTTP_FORBIDDEN, "ip not allowed");
+        }
+
+        if (!check_origin(h, conn))
+            return respond_error(conn, MHD_HTTP_FORBIDDEN, "origin blocked");
+
+        if (!check_auth(h, conn)) {
+            mnemon_log(MNEMON_LOG_WARNING,
+                       "HTTP: auth failed from %s", get_client_ip(conn));
+            return respond_error(conn, MHD_HTTP_UNAUTHORIZED, "unauthorized");
+        }
+
+        rs = calloc(1, sizeof(*rs));
+        if (rs == NULL) return MHD_NO;
+        rs->started_ms = mnemon_time_ms();
+        snprintf(rs->method, sizeof(rs->method), "%s", method);
+        snprintf(rs->ip, sizeof(rs->ip), "%s", get_client_ip(conn));
+        atomic_fetch_add(&h->in_flight_requests, 1);
+        atomic_fetch_add(&h->total_requests, 1);
+        rs->in_flight_counted = true;
+        *con_cls = rs;
+
+        if (strcmp(method, "GET") == 0)
+            return handle_get(h, conn);
+        if (strcmp(method, "DELETE") == 0)
+            return handle_delete(h, conn);
+        if (strcmp(method, "POST") != 0)
+            return respond_error(conn, MHD_HTTP_METHOD_NOT_ALLOWED,
+                                 "method not allowed");
+
+        /* POST: defer until upload data is delivered on the next call */
+        return MHD_YES;
     }
 
-    /* Origin validation */
-    if (!check_origin(h, conn))
-        return respond_error(conn, MHD_HTTP_FORBIDDEN, "origin blocked");
-
-    /* Auth check */
-    if (!check_auth(h, conn)) {
-        const char *ip = get_client_ip(conn);
-        mnemon_log(MNEMON_LOG_WARNING,
-                   "HTTP: auth failed from %s", ip ? ip : "unknown");
-        return respond_error(conn, MHD_HTTP_UNAUTHORIZED, "unauthorized");
-    }
-
-    /* GET: SSE stream for server-initiated messages */
-    if (strcmp(method, "GET") == 0)
-        return handle_get(h, conn);
-
-    /* DELETE: terminate session */
-    if (strcmp(method, "DELETE") == 0)
-        return handle_delete(h, conn);
-
-    /* POST: JSON-RPC request */
-    if (strcmp(method, "POST") != 0)
-        return respond_error(conn, MHD_HTTP_METHOD_NOT_ALLOWED,
-                             "method not allowed");
-
-    /* Accumulate upload data across multiple callbacks */
-    upload_buf_t *upload = (upload_buf_t *)*con_cls;
-    if (!upload) {
-        upload = calloc(1, sizeof(upload_buf_t));
-        if (!upload)
-            return MHD_NO;
-        *con_cls = upload;
-        return MHD_YES; /* First call: just set up the context */
-    }
-
+    /* Subsequent calls: only POST gets here, accumulating upload data */
     if (*upload_data_size > 0) {
-        /* Accumulate POST body */
-        if (upload->len + *upload_data_size > MAX_POST_SIZE) {
+        if (rs->len + *upload_data_size > MAX_POST_SIZE) {
             return respond_error(conn, MHD_HTTP_CONTENT_TOO_LARGE,
                                  "request body too large");
         }
-        if (upload->len + *upload_data_size >= upload->cap) {
-            size_t newcap = upload->cap ? upload->cap * 2 : 4096;
-            while (newcap < upload->len + *upload_data_size + 1) newcap *= 2;
-            char *p = realloc(upload->data, newcap);
-            if (!p) return MHD_NO;
-            upload->data = p;
-            upload->cap = newcap;
+        if (rs->len + *upload_data_size >= rs->cap) {
+            size_t newcap = rs->cap ? rs->cap * 2 : 4096;
+            while (newcap < rs->len + *upload_data_size + 1) newcap *= 2;
+            char *p = realloc(rs->data, newcap);
+            if (p == NULL) return MHD_NO;
+            rs->data = p;
+            rs->cap = newcap;
         }
-        memcpy(upload->data + upload->len, upload_data, *upload_data_size);
-        upload->len += *upload_data_size;
-        upload->data[upload->len] = '\0';
+        memcpy(rs->data + rs->len, upload_data, *upload_data_size);
+        rs->len += *upload_data_size;
+        rs->data[rs->len] = '\0';
         *upload_data_size = 0;
         return MHD_YES;
     }
 
-    /* All data received -- process the request */
-    enum MHD_Result ret = handle_post(h, conn, upload);
-
-    /* Cleanup upload buffer */
-    free(upload->data);
-    free(upload);
-    *con_cls = NULL;
-
-    return ret;
+    return handle_post(h, conn, rs);
 }
 
 /* ---- Cleanup callback (called when connection closes) ---- */
@@ -644,16 +743,40 @@ static void request_completed(void *cls, struct MHD_Connection *conn,
                                void **con_cls,
                                enum MHD_RequestTerminationCode toe)
 {
-    (void)cls;
+    mnemon_http_t *h = (mnemon_http_t *)cls;
     (void)conn;
-    (void)toe;
 
-    upload_buf_t *upload = (upload_buf_t *)*con_cls;
-    if (upload) {
-        free(upload->data);
-        free(upload);
-        *con_cls = NULL;
+    request_state_t *rs = (request_state_t *)*con_cls;
+    if (!rs) return;
+
+    int after = -1;
+    if (rs->in_flight_counted && h)
+        after = atomic_fetch_sub(&h->in_flight_requests, 1) - 1;
+
+    int64_t duration = mnemon_time_ms() - rs->started_ms;
+    const char *tool = rs->tool_name[0] ? rs->tool_name : "-";
+
+    if (h && duration >= SLOW_REQUEST_MS) {
+        atomic_fetch_add(&h->slow_requests, 1);
+        mnemon_log(MNEMON_LOG_WARNING,
+            "HTTP: slow request method=%s tool=%s ip=%s duration=%" PRId64
+            "ms in_flight=%d toe=%d",
+            rs->method, tool, rs->ip, duration, after, (int)toe);
+    } else if (toe != MHD_REQUEST_TERMINATED_COMPLETED_OK) {
+        mnemon_log(MNEMON_LOG_WARNING,
+            "HTTP: request aborted method=%s tool=%s ip=%s duration=%" PRId64
+            "ms in_flight=%d toe=%d",
+            rs->method, tool, rs->ip, duration, after, (int)toe);
+    } else {
+        mnemon_log(MNEMON_LOG_DEBUG,
+            "HTTP: request method=%s tool=%s ip=%s duration=%" PRId64
+            "ms in_flight=%d",
+            rs->method, tool, rs->ip, duration, after);
     }
+
+    free(rs->data);
+    free(rs);
+    *con_cls = NULL;
 }
 
 /* ---- Public API ---- */
@@ -686,6 +809,14 @@ mnemon_err_t mnemon_http_start(mnemon_http_t **out,
                     ? strdup(cfg->auth_token) : NULL;
     h->mcp_path = strdup(cfg->mcp_path ? cfg->mcp_path : "/mcp");
     h->allow_count = parse_allow_ips(cfg->allow_ips, &h->allow_list);
+    h->max_connections = cfg->max_connections;
+    atomic_init(&h->open_connections, 0);
+    atomic_init(&h->in_flight_requests, 0);
+    atomic_init(&h->total_requests, 0);
+    atomic_init(&h->slow_requests, 0);
+    atomic_init(&h->rejected_connections, 0);
+    atomic_init(&h->last_conn_warn_ms, 0);
+    h->last_warn_pct = 0;
     pthread_mutex_init(&h->session_mutex, NULL);
 
     int port = cfg->port > 0 ? cfg->port : 3847;
@@ -710,6 +841,11 @@ mnemon_err_t mnemon_http_start(mnemon_http_t **out,
         free(h);
         return MNEMON_ERR_INVALID_INPUT;
     }
+
+    unsigned int conn_timeout = cfg->connection_timeout > 0
+        ? (unsigned int)cfg->connection_timeout : 0;
+    unsigned int per_ip_limit = cfg->per_ip_connection_limit > 0
+        ? (unsigned int)cfg->per_ip_connection_limit : 0;
 
     /* Start the daemon */
     if (cfg->tls_cert_path && cfg->tls_key_path) {
@@ -759,25 +895,37 @@ mnemon_err_t mnemon_http_start(mnemon_http_t **out,
         h->daemon = MHD_start_daemon(
             flags, (uint16_t)port, NULL, NULL,
             request_handler, h,
-            MHD_OPTION_NOTIFY_COMPLETED, request_completed, NULL,
+            MHD_OPTION_NOTIFY_COMPLETED, request_completed, h,
+            MHD_OPTION_NOTIFY_CONNECTION, notify_connection_cb, h,
             MHD_OPTION_CONNECTION_LIMIT, (unsigned int)cfg->max_connections,
+            MHD_OPTION_PER_IP_CONNECTION_LIMIT, per_ip_limit,
+            MHD_OPTION_CONNECTION_TIMEOUT, conn_timeout,
             MHD_OPTION_SOCK_ADDR, (struct sockaddr *)&bind_addr,
             MHD_OPTION_HTTPS_MEM_KEY, h->tls_key_mem,
             MHD_OPTION_HTTPS_MEM_CERT, h->tls_cert_mem,
             MHD_OPTION_END);
+        if (h->daemon == NULL) {
+            mnemon_err_set(MNEMON_ERR_INTERNAL, 0,
+                           "MHD_start_daemon (TLS) failed on port %d", port);
+        }
     } else {
         h->daemon = MHD_start_daemon(
             flags, (uint16_t)port, NULL, NULL,
             request_handler, h,
-            MHD_OPTION_NOTIFY_COMPLETED, request_completed, NULL,
+            MHD_OPTION_NOTIFY_COMPLETED, request_completed, h,
+            MHD_OPTION_NOTIFY_CONNECTION, notify_connection_cb, h,
             MHD_OPTION_CONNECTION_LIMIT, (unsigned int)cfg->max_connections,
+            MHD_OPTION_PER_IP_CONNECTION_LIMIT, per_ip_limit,
+            MHD_OPTION_CONNECTION_TIMEOUT, conn_timeout,
             MHD_OPTION_SOCK_ADDR, (struct sockaddr *)&bind_addr,
             MHD_OPTION_END);
+        if (h->daemon == NULL) {
+            mnemon_err_set(MNEMON_ERR_INTERNAL, 0,
+                           "MHD_start_daemon failed on port %d", port);
+        }
     }
 
-    if (!h->daemon) {
-        mnemon_err_set(MNEMON_ERR_INTERNAL, 0,
-                       "MHD_start_daemon failed on port %d", port);
+    if (h->daemon == NULL) {
         free(h->auth_token);
         free(h->mcp_path);
         free(h->tls_cert_mem);
@@ -788,12 +936,14 @@ mnemon_err_t mnemon_http_start(mnemon_http_t **out,
     }
 
     mnemon_log(MNEMON_LOG_INFO,
-               "HTTP transport started: %s:%d%s (auth=%s, tls=%s, allow_ips=%s)",
+               "HTTP transport started: %s:%d%s (auth=%s, tls=%s, allow_ips=%s, "
+               "max_conn=%d, idle_timeout=%us, per_ip_limit=%u)",
                cfg->bind_address ? cfg->bind_address : "0.0.0.0",
                port, h->mcp_path,
                h->auth_token ? "yes" : "no",
                (cfg->tls_cert_path && cfg->tls_key_path) ? "yes" : "no",
-               h->allow_count > 0 ? cfg->allow_ips : "all");
+               h->allow_count > 0 ? cfg->allow_ips : "all",
+               cfg->max_connections, conn_timeout, per_ip_limit);
 
     *out = h;
     return MNEMON_OK;
@@ -836,6 +986,20 @@ void mnemon_http_stop(mnemon_http_t *h)
 int mnemon_http_session_count(const mnemon_http_t *h)
 {
     return h ? h->session_count : 0;
+}
+
+void mnemon_http_get_stats(mnemon_http_t *h, mnemon_http_stats_t *out)
+{
+    if (!out) return;
+    memset(out, 0, sizeof(*out));
+    if (!h) return;
+    out->sessions             = h->session_count;
+    out->open_connections     = atomic_load(&h->open_connections);
+    out->max_connections      = h->max_connections;
+    out->in_flight_requests   = atomic_load(&h->in_flight_requests);
+    out->total_requests       = atomic_load(&h->total_requests);
+    out->slow_requests        = atomic_load(&h->slow_requests);
+    out->rejected_connections = atomic_load(&h->rejected_connections);
 }
 
 mnemon_err_t mnemon_http_push_event(mnemon_http_t *h, const char *session_id,
@@ -892,6 +1056,8 @@ mnemon_err_t mnemon_http_start(mnemon_http_t **out,
 
 void mnemon_http_stop(mnemon_http_t *h) { (void)h; }
 int mnemon_http_session_count(const mnemon_http_t *h) { (void)h; return 0; }
+void mnemon_http_get_stats(mnemon_http_t *h, mnemon_http_stats_t *out)
+{ (void)h; if (out) memset(out, 0, sizeof(*out)); }
 mnemon_err_t mnemon_http_push_event(mnemon_http_t *h, const char *session_id,
                                     const char *event_type,
                                     const char *json_data)

@@ -136,6 +136,46 @@ static void *shutdown_watchdog(void *arg)
     return NULL;
 }
 
+/* Heartbeat: periodically log runtime gauges so a hang or capacity issue
+ * leaves a trail in the logs even when nobody is watching live. */
+typedef struct {
+    int                     interval_secs;
+    mnemon_http_t          *http;
+    mnemon_reader_pool_t   *reader_pool;
+} heartbeat_ctx_t;
+
+static void *heartbeat_thread(void *arg)
+{
+    heartbeat_ctx_t *ctx = (heartbeat_ctx_t *)arg;
+    int interval = ctx->interval_secs > 0 ? ctx->interval_secs : 60;
+
+    while (!mnemon_shutdown_requested()) {
+        for (int i = 0; i < interval && !mnemon_shutdown_requested(); i++)
+            sleep(1);
+        if (mnemon_shutdown_requested()) break;
+
+        if (ctx->http) {
+            mnemon_http_stats_t hs;
+            mnemon_http_get_stats(ctx->http, &hs);
+            mnemon_log(MNEMON_LOG_INFO,
+                       "HEARTBEAT http: sessions=%d connections=%d/%d "
+                       "in_flight=%d total=%llu slow=%llu",
+                       hs.sessions, hs.open_connections,
+                       hs.max_connections, hs.in_flight_requests,
+                       (unsigned long long)hs.total_requests,
+                       (unsigned long long)hs.slow_requests);
+        }
+        if (ctx->reader_pool) {
+            int qd = 0, busy = 0, sz = 0;
+            mnemon_reader_pool_stats(ctx->reader_pool, &qd, &busy, &sz);
+            mnemon_log(MNEMON_LOG_INFO,
+                       "HEARTBEAT reader_pool: size=%d busy=%d queued=%d",
+                       sz, busy, qd);
+        }
+    }
+    return NULL;
+}
+
 /* Install signal handlers */
 static void setup_signals(void)
 {
@@ -657,14 +697,16 @@ int main(int argc, char *argv[])
     /* Start HTTP transport for daemon/foreground modes */
     if (mode != MODE_STDIO && cfg->http_enabled) {
         mnemon_http_config_t http_cfg = {
-            .bind_address    = cfg->http_bind,
-            .port            = cfg->http_port,
-            .max_connections = cfg->http_max_connections,
-            .auth_token      = cfg->http_auth_token,
-            .allow_ips       = cfg->http_allow_ips,
-            .tls_cert_path   = cfg->tls_cert,
-            .tls_key_path    = cfg->tls_key,
-            .mcp_path        = "/mcp",
+            .bind_address           = cfg->http_bind,
+            .port                   = cfg->http_port,
+            .max_connections        = cfg->http_max_connections,
+            .connection_timeout     = cfg->http_connection_timeout,
+            .per_ip_connection_limit= cfg->http_per_ip_connection_limit,
+            .auth_token             = cfg->http_auth_token,
+            .allow_ips              = cfg->http_allow_ips,
+            .tls_cert_path          = cfg->tls_cert,
+            .tls_key_path           = cfg->tls_key,
+            .mcp_path               = "/mcp",
         };
 
         err = mnemon_http_start(&http, &http_cfg, dispatch);
@@ -691,6 +733,26 @@ int main(int argc, char *argv[])
     /* Notify systemd if in foreground mode */
     if (mode == MODE_FOREGROUND)
         mnemon_sd_notify_ready();
+
+    /* Optional diagnostic heartbeat thread */
+    pthread_t hb_thread;
+    bool hb_started = false;
+    heartbeat_ctx_t hb_ctx = {
+        .interval_secs = cfg->diag_heartbeat_secs,
+        .http          = http,
+        .reader_pool   = reader_pool,
+    };
+    if (mode != MODE_STDIO && cfg->diag_heartbeat_secs > 0) {
+        if (pthread_create(&hb_thread, NULL, heartbeat_thread, &hb_ctx) == 0) {
+            hb_started = true;
+            mnemon_log(MNEMON_LOG_INFO,
+                       "diagnostic heartbeat enabled (every %ds)",
+                       cfg->diag_heartbeat_secs);
+        } else {
+            mnemon_log(MNEMON_LOG_WARNING,
+                       "failed to start heartbeat thread");
+        }
+    }
 
     /* --- Main event loop --- */
     if (mode == MODE_STDIO) {
@@ -751,6 +813,27 @@ int main(int argc, char *argv[])
                            st.total_memories, st.total_entities,
                            st.total_edges, st.fts_indexed,
                            st.memory_vectors, st.entity_vectors);
+
+                if (http) {
+                    mnemon_http_stats_t hs;
+                    mnemon_http_get_stats(http, &hs);
+                    mnemon_log(MNEMON_LOG_INFO,
+                               "STATS http: sessions=%d connections=%d/%d "
+                               "in_flight=%d total=%llu slow=%llu rejected=%llu",
+                               hs.sessions, hs.open_connections,
+                               hs.max_connections, hs.in_flight_requests,
+                               (unsigned long long)hs.total_requests,
+                               (unsigned long long)hs.slow_requests,
+                               (unsigned long long)hs.rejected_connections);
+                }
+
+                if (reader_pool) {
+                    int qd = 0, busy = 0, sz = 0;
+                    mnemon_reader_pool_stats(reader_pool, &qd, &busy, &sz);
+                    mnemon_log(MNEMON_LOG_INFO,
+                               "STATS reader_pool: size=%d busy=%d queued=%d",
+                               sz, busy, qd);
+                }
             }
         }
     }
@@ -771,6 +854,10 @@ int main(int argc, char *argv[])
 
     if (mode == MODE_FOREGROUND || mode == MODE_DAEMON)
         mnemon_sd_notify_stopping();
+
+    /* Stop heartbeat thread (it polls shutdown flag every 1s) */
+    if (hb_started)
+        pthread_join(hb_thread, NULL);
 
     /* Stop HTTP transport */
     if (http)

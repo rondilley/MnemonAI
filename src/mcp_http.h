@@ -31,6 +31,8 @@ typedef struct {
     const char *bind_address;    /* "127.0.0.1" or "0.0.0.0" */
     int         port;            /* default 3847 */
     int         max_connections; /* default 32 */
+    int         connection_timeout;     /* seconds idle before MHD reaps (0 = none, default 120) */
+    int         per_ip_connection_limit;/* per-IP concurrent cap (0 = unlimited) */
     const char *auth_token;      /* Bearer token (NULL = no auth) */
     const char *allow_ips;       /* comma-separated CIDR allow list (NULL = allow all) */
     const char *tls_cert_path;   /* PEM cert file (NULL = no TLS) */
@@ -48,6 +50,19 @@ void mnemon_http_stop(mnemon_http_t *h);
 
 /* Get the number of active sessions. */
 int mnemon_http_session_count(const mnemon_http_t *h);
+
+/* Runtime gauges for diagnostics. Safe to call concurrently. */
+typedef struct {
+    int      sessions;             /* MCP sessions tracked */
+    int      open_connections;     /* TCP connections currently open */
+    int      max_connections;      /* configured ceiling */
+    int      in_flight_requests;   /* requests currently dispatching */
+    uint64_t total_requests;       /* lifetime requests handled */
+    uint64_t slow_requests;        /* lifetime requests > slow threshold */
+    uint64_t rejected_connections; /* MHD declined (limit hit) */
+} mnemon_http_stats_t;
+
+void mnemon_http_get_stats(mnemon_http_t *h, mnemon_http_stats_t *out);
 
 /* Push an SSE event to a specific session's stream.
  * No-op if session has no active SSE connection. */

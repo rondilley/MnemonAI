@@ -321,8 +321,24 @@ kill -USR1 $(pgrep mnemond)           # dump stats to log
 | `SIGTERM` | Graceful shutdown (10s timeout, then forced exit) |
 | `SIGINT` | Same as SIGTERM |
 | `SIGHUP` | Reload config (log level, decay params) without restart |
-| `SIGUSR1` | Dump memory/entity/index stats to log |
+| `SIGUSR1` | Dump stats to log: memories/entities/indexes, plus HTTP gauges (sessions, open connections, in-flight requests, slow-request count) and reader-pool depth |
 | 3x `SIGTERM` | Immediate forced exit (emergency) |
+
+### Diagnostic Logging
+
+When the HTTP transport is enabled, every request emits a completion log line.
+Long-running requests (>= 1 s) and abnormally-terminated requests are logged at
+`WARNING`. The TCP connection gauge logs a `WARNING` when crossing 75 / 90 / 100 %
+of `max_connections` (with a 60 s cooldown to avoid spam).
+
+Idle connections are reaped after `[http] connection_timeout` (default 120 s),
+and accepted sockets get `SO_KEEPALIVE` with a ~120 s dead-peer detection
+window so half-open client connections do not pin slots indefinitely. Use
+`[http] per_ip_connection_limit` to bound concurrent connections per client IP.
+
+Set `[diag] heartbeat_secs = N` to log the same gauges every N seconds at INFO,
+useful for post-mortem when nobody is watching live. SIGUSR1 dumps them on demand
+regardless of this setting.
 
 ---
 
@@ -406,6 +422,12 @@ EOF
 - **`auth_token`** -- Static Bearer token. Clients must send `Authorization: Bearer <token>` on every request. Generate one with: `openssl rand -hex 32`
 
 Both can be used together (IP filter runs first, then auth). For a trusted local network, `allow_ips` alone is sufficient. For exposure to untrusted networks, use `auth_token` (with TLS).
+
+**Connection-pool tuning** (defaults are fine for most setups):
+
+- **`max_connections`** (default 32) -- Global concurrent TCP connection ceiling. New connections beyond this are refused at the OS level.
+- **`connection_timeout`** (default 120 s) -- Idle HTTP connections are reaped after this many seconds. Combined with per-socket TCP keepalive (~120 s dead-peer detection), this prevents half-open client sockets from pinning slots indefinitely. Set to `0` to disable, but note that without it, dead clients can fill the pool until they're noticed.
+- **`per_ip_connection_limit`** (default 0 = unlimited) -- Cap on concurrent connections from a single client IP. Set to e.g. `8` if you want one misbehaving client to be unable to consume the whole `max_connections` budget.
 
 2. **Start the server** (or restart the systemd service if already enabled):
 
@@ -521,7 +543,7 @@ systemctl --user restart mnemond
 The log should now show `tls=yes`:
 
 ```
-[INFO] HTTP transport started: 0.0.0.0:3847/mcp (auth=yes, tls=yes)
+[INFO] HTTP transport started: 0.0.0.0:3847/mcp (auth=yes, tls=yes, allow_ips=all, max_conn=32, idle_timeout=120s, per_ip_limit=0)
 ```
 
 **Verify TLS is working:**
@@ -869,6 +891,9 @@ reader_pool_size = 4                  # persistent reader threads (0 = ad-hoc)
 [security]
 detect_secrets = true                 # reject content containing API keys, tokens
 max_memory_size_kb = 64               # per-memory content size limit
+
+[diag]
+heartbeat_secs = 0                    # 0 = off; N>0 logs HTTP/reader-pool gauges every N seconds
 ```
 
 ## Dependencies

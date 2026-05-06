@@ -95,6 +95,8 @@ typedef struct mnemon_reader_pool {
     pthread_cond_t   cond;
     reader_task_t   *head;
     reader_task_t   *tail;
+    int              queue_depth;   /* protected by mutex */
+    int              busy;          /* workers currently running a task */
     bool             running;
 } mnemon_reader_pool_t;
 
@@ -107,5 +109,13 @@ void         mnemon_reader_pool_stop(mnemon_reader_pool_t *pool);
 mnemon_err_t mnemon_reader_pool_submit(mnemon_reader_pool_t *pool,
                                        reader_task_t *task);
 void         mnemon_reader_task_wait(reader_task_t *task);
+
+/* Snapshot pool gauges for diagnostics. Safe to call concurrently. */
+void         mnemon_reader_pool_stats(mnemon_reader_pool_t *pool,
+                                      int *queue_depth, int *busy,
+                                      int *pool_size);
+
+/* Snapshot writer queue depth for diagnostics. */
+size_t       mnemon_writer_queue_depth(mnemon_writer_t *w);
 
 #endif /* MNEMON_THREADS_H */

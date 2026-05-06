@@ -58,10 +58,14 @@ typedef struct mnemon_config {
     char    *http_bind;
     int      http_port;
     int      http_max_connections;
+    int      http_connection_timeout;     /* seconds idle before MHD reaps; 0 = no timeout */
+    int      http_per_ip_connection_limit;/* per-IP cap; 0 = unlimited */
     char    *http_auth_token;
     char    *http_allow_ips;     /* comma-separated CIDR list, NULL = allow all */
     char    *tls_cert;
     char    *tls_key;
+    /* [diag] */
+    int      diag_heartbeat_secs;   /* 0 = disabled */
 } mnemon_config_t;
 
 mnemon_err_t mnemon_config_load(const char *path, mnemon_config_t **out);

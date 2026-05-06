@@ -201,6 +201,9 @@ Configure TLS by setting `tls_cert` and `tls_key` in the `[http]` config section
 
 - Maximum concurrent sessions: 256
 - Sessions are tracked with creation time and last-active timestamps
+- Maximum concurrent TCP connections: `[http] max_connections` (default 32)
+- Idle TCP connections are reaped after `[http] connection_timeout` seconds (default 120)
+- Optional per-client-IP cap: `[http] per_ip_connection_limit` (default 0 = unlimited)
 
 ---
 

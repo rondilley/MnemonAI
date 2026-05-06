@@ -188,11 +188,17 @@ static void *reader_pool_worker(void *arg)
             pool->head = task->next;
             if (!pool->head)
                 pool->tail = NULL;
+            pool->queue_depth--;
+            pool->busy++;
         }
         pthread_mutex_unlock(&pool->mutex);
 
         if (task) {
             task->fn(task->arg);
+
+            pthread_mutex_lock(&pool->mutex);
+            pool->busy--;
+            pthread_mutex_unlock(&pool->mutex);
 
             pthread_mutex_lock(&task->mutex);
             task->done = true;
@@ -270,11 +276,38 @@ mnemon_err_t mnemon_reader_pool_submit(mnemon_reader_pool_t *pool,
     else
         pool->head = task;
     pool->tail = task;
+    pool->queue_depth++;
 
     pthread_cond_signal(&pool->cond);
     pthread_mutex_unlock(&pool->mutex);
 
     return MNEMON_OK;
+}
+
+void mnemon_reader_pool_stats(mnemon_reader_pool_t *pool,
+                              int *queue_depth, int *busy, int *pool_size)
+{
+    if (!pool) {
+        if (queue_depth) *queue_depth = 0;
+        if (busy)        *busy = 0;
+        if (pool_size)   *pool_size = 0;
+        return;
+    }
+    pthread_mutex_lock(&pool->mutex);
+    if (queue_depth) *queue_depth = pool->queue_depth;
+    if (busy)        *busy = pool->busy;
+    if (pool_size)   *pool_size = pool->pool_size;
+    pthread_mutex_unlock(&pool->mutex);
+}
+
+size_t mnemon_writer_queue_depth(mnemon_writer_t *w)
+{
+    size_t d;
+    if (!w || !w->running) return 0;
+    pthread_mutex_lock(&w->mutex);
+    d = w->depth;
+    pthread_mutex_unlock(&w->mutex);
+    return d;
 }
 
 void mnemon_reader_task_wait(reader_task_t *task)
