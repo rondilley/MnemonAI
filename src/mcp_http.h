@@ -33,6 +33,7 @@ typedef struct {
     int         max_connections; /* default 32 */
     int         connection_timeout;     /* seconds idle before MHD reaps (0 = none, default 120) */
     int         per_ip_connection_limit;/* per-IP concurrent cap (0 = unlimited) */
+    int         session_idle_timeout;   /* seconds idle before MCP session is reaped (0 = never, default 1800) */
     const char *auth_token;      /* Bearer token (NULL = no auth) */
     const char *allow_ips;       /* comma-separated CIDR allow list (NULL = allow all) */
     const char *tls_cert_path;   /* PEM cert file (NULL = no TLS) */

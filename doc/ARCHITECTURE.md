@@ -1683,6 +1683,9 @@ connection_timeout = 120            # Seconds idle before MHD reaps a connection
                                     # (0 = no timeout; not recommended).
 per_ip_connection_limit = 0         # Concurrent connections allowed per client IP
                                     # (0 = unlimited).
+session_idle_timeout = 1800         # Seconds before an MCP session with no traffic
+                                    # is reaped (0 = never; not recommended -- the
+                                    # 256-slot table fills from client restarts).
 auth_token =                        # Required if bind != 127.0.0.1; static Bearer token
 
 [diag]
@@ -1721,6 +1724,24 @@ reaping; both layers below are configured explicitly:
 - **`MHD_OPTION_PER_IP_CONNECTION_LIMIT`** (`[http] per_ip_connection_limit`,
   default 0 = unlimited) caps concurrent connections per client IP, providing
   a per-client circuit breaker independent of the global `max_connections`.
+
+#### MCP Session Reaping
+
+MCP sessions are independent of TCP connections by design -- a single session
+spans many request connections. Sessions are only freed by an explicit
+`DELETE /mcp`, which most clients never send. Three layers reap stale state:
+
+- **`[http] session_idle_timeout`** (default 1800 s) -- on every new session
+  creation, sessions with `last_active` older than this are reaped. Runs
+  opportunistically (no background thread); zero idle traffic = no reaping
+  needed since memory pressure is bounded by the 256-session table.
+- **SSE TCP-close cleanup** -- when an SSE stream's TCP connection closes,
+  the queue is destroyed and the session's `sse_queue` pointer cleared. This
+  is what makes SSE-using sessions eligible for the idle reaper afterwards.
+- **LRU eviction at capacity** -- if the table is full and idle reaping
+  found nothing, the session with the oldest `last_active` is evicted to make
+  room. Sessions with an active SSE stream are protected from both eviction
+  and idle reaping.
 
 ### 12.3 Config Search Path
 

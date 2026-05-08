@@ -85,6 +85,7 @@ struct mnemon_http {
     cidr_entry_t       *allow_list;    /* parsed CIDR entries (NULL = allow all) */
     int                 allow_count;
     int                 max_connections;
+    int                 session_idle_timeout_ms;  /* 0 = no idle reaping */
 
     /* Diagnostic gauges (lock-free) */
     atomic_int          open_connections;
@@ -121,10 +122,75 @@ static http_session_t *find_session(mnemon_http_t *h, const char *id)
     return NULL;
 }
 
+static void remove_session(mnemon_http_t *h, const char *id);
+
+/* Reap any session whose last_active is older than session_idle_timeout_ms.
+ * Sessions with an open SSE stream are protected -- the SSE TCP close
+ * callback (sse_content_free) is what clears their sse_queue pointer, after
+ * which they become eligible here.
+ * Caller must hold session_mutex. Returns count reaped. */
+static int reap_idle_sessions_locked(mnemon_http_t *h)
+{
+    if (h->session_idle_timeout_ms <= 0) return 0;
+    int64_t cutoff = mnemon_time_ms() - h->session_idle_timeout_ms;
+    int reaped = 0;
+    /* Iterate from end -- remove_session compacts by swapping the last
+     * element into the freed slot, so reverse iteration is index-stable. */
+    for (int i = h->session_count - 1; i >= 0; i--) {
+        if (h->sessions[i].sse_queue) continue;
+        if (h->sessions[i].last_active < cutoff) {
+            char id[64];
+            snprintf(id, sizeof(id), "%s", h->sessions[i].id);
+            remove_session(h, id);
+            reaped++;
+        }
+    }
+    if (reaped > 0)
+        mnemon_log(MNEMON_LOG_INFO,
+                   "HTTP: reaped %d idle session(s) (idle > %d s)",
+                   reaped, h->session_idle_timeout_ms / 1000);
+    return reaped;
+}
+
+/* Evict the least-recently-active session, skipping any with an open SSE
+ * stream (those are still in active use even if not generating POSTs).
+ * Caller must hold session_mutex. Returns true if a session was evicted. */
+static bool evict_lru_session_locked(mnemon_http_t *h)
+{
+    int candidate = -1;
+    for (int i = 0; i < h->session_count; i++) {
+        if (h->sessions[i].sse_queue)
+            continue;  /* protected: active SSE stream */
+        if (candidate < 0 ||
+            h->sessions[i].last_active < h->sessions[candidate].last_active)
+            candidate = i;
+    }
+    if (candidate < 0)
+        return false;  /* every slot has an active SSE stream */
+
+    char id[64];
+    int64_t age_ms = mnemon_time_ms() - h->sessions[candidate].last_active;
+    snprintf(id, sizeof(id), "%s", h->sessions[candidate].id);
+    remove_session(h, id);
+    mnemon_log(MNEMON_LOG_INFO,
+               "HTTP: evicted idle session %s (idle %lld s) -- "
+               "session table at capacity, MCP clients should send DELETE on shutdown",
+               id, (long long)(age_ms / 1000));
+    return true;
+}
+
 static http_session_t *create_session(mnemon_http_t *h)
 {
-    if (h->session_count >= MAX_SESSIONS)
-        return NULL;
+    /* First sweep idle sessions opportunistically. This is the primary
+     * mechanism for releasing sessions whose client has gone away (no
+     * traffic for session_idle_timeout). LRU eviction below is a
+     * last-resort safety net. */
+    reap_idle_sessions_locked(h);
+
+    if (h->session_count >= MAX_SESSIONS) {
+        if (!evict_lru_session_locked(h))
+            return NULL;  /* truly out of capacity (all sessions have SSE) */
+    }
 
     http_session_t *s = &h->sessions[h->session_count];
     mnemon_uuid_t u;
@@ -133,6 +199,7 @@ static http_session_t *create_session(mnemon_http_t *h)
     s->initialized = false;
     s->created_at = mnemon_time_ms();
     s->last_active = s->created_at;
+    s->sse_queue = NULL;
     h->session_count++;
     return s;
 }
@@ -488,14 +555,22 @@ static enum MHD_Result handle_options(struct MHD_Connection *conn)
 
 /* ---- SSE content reader callback for MHD streaming ---- */
 
+/* Per-stream context passed to the SSE reader/free callbacks. Lets us tie
+ * the queue back to its session on TCP close so we can fully reap it. */
+typedef struct {
+    mnemon_http_t *h;
+    sse_queue_t   *q;
+    char           session_id[64];
+} sse_stream_ctx_t;
+
 static ssize_t sse_content_reader(void *cls, uint64_t pos, char *buf,
                                   size_t max)
 {
     (void)pos;
-    sse_queue_t *q = (sse_queue_t *)cls;
+    sse_stream_ctx_t *ctx = (sse_stream_ctx_t *)cls;
     sse_event_t event;
 
-    mnemon_err_t err = sse_queue_pop(q, &event, 200);
+    mnemon_err_t err = sse_queue_pop(ctx->q, &event, 200);
     if (err == MNEMON_ERR_SHUTDOWN)
         return MHD_CONTENT_READER_END_OF_STREAM;
     if (err == MNEMON_ERR_NOT_FOUND)
@@ -511,11 +586,30 @@ static ssize_t sse_content_reader(void *cls, uint64_t pos, char *buf,
     return (ssize_t)(n < (int)max ? n : (int)max);
 }
 
+/* Called by MHD when the SSE response is destroyed (TCP closed by either
+ * side, or daemon stopping). MHD guarantees the reader callback has fully
+ * returned before this fires, so it is safe to destroy the queue. We take
+ * ownership only if the session still references THIS queue -- if the
+ * session was already removed (DELETE, idle reap, LRU eviction), that path
+ * already destroyed the queue and ctx->q is dangling; do not touch it. */
 static void sse_content_free(void *cls)
 {
-    sse_queue_t *q = (sse_queue_t *)cls;
-    if (q)
-        sse_queue_close(q);
+    sse_stream_ctx_t *ctx = (sse_stream_ctx_t *)cls;
+    if (!ctx) return;
+
+    pthread_mutex_lock(&ctx->h->session_mutex);
+    http_session_t *session = find_session(ctx->h, ctx->session_id);
+    if (session && session->sse_queue == ctx->q) {
+        sse_queue_close(ctx->q);
+        sse_queue_destroy(ctx->q);
+        free(ctx->q);
+        session->sse_queue = NULL;
+        mnemon_log(MNEMON_LOG_INFO,
+                   "HTTP: SSE stream closed for session %s -- queue reaped",
+                   ctx->session_id);
+    }
+    pthread_mutex_unlock(&ctx->h->session_mutex);
+    free(ctx);
 }
 
 /* ---- GET handler: SSE stream for server-initiated messages ---- */
@@ -552,14 +646,27 @@ static enum MHD_Result handle_get(mnemon_http_t *h,
         }
     }
     sse_queue_t *q = session->sse_queue;
+    sse_stream_ctx_t *ctx = calloc(1, sizeof(*ctx));
+    if (!ctx) {
+        pthread_mutex_unlock(&h->session_mutex);
+        return respond_error(conn, MHD_HTTP_INTERNAL_SERVER_ERROR, "OOM");
+    }
+    ctx->h = h;
+    ctx->q = q;
+    snprintf(ctx->session_id, sizeof(ctx->session_id), "%s", session->id);
     pthread_mutex_unlock(&h->session_mutex);
 
     /* Create streaming response */
     struct MHD_Response *resp = MHD_create_response_from_callback(
-        MHD_SIZE_UNKNOWN, 4096, sse_content_reader, q, sse_content_free);
-    if (!resp)
+        MHD_SIZE_UNKNOWN, 4096, sse_content_reader, ctx, sse_content_free);
+    if (!resp) {
+        /* sse_content_free will not be called -- clean up ctx ourselves.
+         * Leave session->sse_queue intact; it'll be reused on next GET or
+         * destroyed when the session is reaped/removed. */
+        free(ctx);
         return respond_error(conn, MHD_HTTP_INTERNAL_SERVER_ERROR,
                              "failed to create SSE response");
+    }
 
     MHD_add_response_header(resp, "Content-Type", "text/event-stream");
     MHD_add_response_header(resp, "Cache-Control", "no-cache");
@@ -810,6 +917,8 @@ mnemon_err_t mnemon_http_start(mnemon_http_t **out,
     h->mcp_path = strdup(cfg->mcp_path ? cfg->mcp_path : "/mcp");
     h->allow_count = parse_allow_ips(cfg->allow_ips, &h->allow_list);
     h->max_connections = cfg->max_connections;
+    h->session_idle_timeout_ms = cfg->session_idle_timeout > 0
+        ? cfg->session_idle_timeout * 1000 : 0;
     atomic_init(&h->open_connections, 0);
     atomic_init(&h->in_flight_requests, 0);
     atomic_init(&h->total_requests, 0);
@@ -937,13 +1046,15 @@ mnemon_err_t mnemon_http_start(mnemon_http_t **out,
 
     mnemon_log(MNEMON_LOG_INFO,
                "HTTP transport started: %s:%d%s (auth=%s, tls=%s, allow_ips=%s, "
-               "max_conn=%d, idle_timeout=%us, per_ip_limit=%u)",
+               "max_conn=%d, idle_timeout=%us, per_ip_limit=%u, "
+               "session_idle=%ds)",
                cfg->bind_address ? cfg->bind_address : "0.0.0.0",
                port, h->mcp_path,
                h->auth_token ? "yes" : "no",
                (cfg->tls_cert_path && cfg->tls_key_path) ? "yes" : "no",
                h->allow_count > 0 ? cfg->allow_ips : "all",
-               cfg->max_connections, conn_timeout, per_ip_limit);
+               cfg->max_connections, conn_timeout, per_ip_limit,
+               cfg->session_idle_timeout);
 
     *out = h;
     return MNEMON_OK;

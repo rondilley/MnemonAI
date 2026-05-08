@@ -702,6 +702,7 @@ int main(int argc, char *argv[])
             .max_connections        = cfg->http_max_connections,
             .connection_timeout     = cfg->http_connection_timeout,
             .per_ip_connection_limit= cfg->http_per_ip_connection_limit,
+            .session_idle_timeout   = cfg->http_session_idle_timeout,
             .auth_token             = cfg->http_auth_token,
             .allow_ips              = cfg->http_allow_ips,
             .tls_cert_path          = cfg->tls_cert,

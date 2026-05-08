@@ -86,6 +86,7 @@ static void set_defaults(mnemon_config_t *cfg)
     cfg->http_max_connections = 32;
     cfg->http_connection_timeout = 120;
     cfg->http_per_ip_connection_limit = 0;
+    cfg->http_session_idle_timeout = 1800;
     cfg->http_auth_token = NULL;
     cfg->tls_cert = NULL;
     cfg->tls_key = NULL;
@@ -153,6 +154,7 @@ static void set_value(mnemon_config_t *cfg, const char *section,
         else if (strcmp(key, "max_connections") == 0) INT_SET(http_max_connections);
         else if (strcmp(key, "connection_timeout") == 0) INT_SET(http_connection_timeout);
         else if (strcmp(key, "per_ip_connection_limit") == 0) INT_SET(http_per_ip_connection_limit);
+        else if (strcmp(key, "session_idle_timeout") == 0) INT_SET(http_session_idle_timeout);
         else if (strcmp(key, "auth_token") == 0 && strlen(value) > 0) {
             free(cfg->http_auth_token);
             cfg->http_auth_token = strdup(value);
@@ -282,6 +284,12 @@ mnemon_err_t mnemon_config_validate(const mnemon_config_t *cfg)
         cfg->http_per_ip_connection_limit > 65535) {
         mnemon_err_set(MNEMON_ERR_INVALID_INPUT, 0,
                        "http per_ip_connection_limit must be 0-65535");
+        return MNEMON_ERR_INVALID_INPUT;
+    }
+    if (cfg->http_session_idle_timeout < 0 ||
+        cfg->http_session_idle_timeout > 86400 * 7) {
+        mnemon_err_set(MNEMON_ERR_INVALID_INPUT, 0,
+                       "http session_idle_timeout must be 0-604800 seconds");
         return MNEMON_ERR_INVALID_INPUT;
     }
     return MNEMON_OK;

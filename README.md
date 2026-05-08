@@ -428,6 +428,7 @@ Both can be used together (IP filter runs first, then auth). For a trusted local
 - **`max_connections`** (default 32) -- Global concurrent TCP connection ceiling. New connections beyond this are refused at the OS level.
 - **`connection_timeout`** (default 120 s) -- Idle HTTP connections are reaped after this many seconds. Combined with per-socket TCP keepalive (~120 s dead-peer detection), this prevents half-open client sockets from pinning slots indefinitely. Set to `0` to disable, but note that without it, dead clients can fill the pool until they're noticed.
 - **`per_ip_connection_limit`** (default 0 = unlimited) -- Cap on concurrent connections from a single client IP. Set to e.g. `8` if you want one misbehaving client to be unable to consume the whole `max_connections` budget.
+- **`session_idle_timeout`** (default 1800 s) -- MCP sessions are reaped after this many seconds without any traffic. Most MCP clients (Claude Code, Cursor, Codex CLI) don't send `DELETE` on shutdown, so without this setting, the 256-slot session table would slowly fill from client restarts. Sessions with an active SSE stream are protected from reaping; the stream's TCP close is what ends the protection. Set to `0` to disable (not recommended).
 
 2. **Start the server** (or restart the systemd service if already enabled):
 
@@ -543,7 +544,7 @@ systemctl --user restart mnemond
 The log should now show `tls=yes`:
 
 ```
-[INFO] HTTP transport started: 0.0.0.0:3847/mcp (auth=yes, tls=yes, allow_ips=all, max_conn=32, idle_timeout=120s, per_ip_limit=0)
+[INFO] HTTP transport started: 0.0.0.0:3847/mcp (auth=yes, tls=yes, allow_ips=all, max_conn=32, idle_timeout=120s, per_ip_limit=0, session_idle=1800s)
 ```
 
 **Verify TLS is working:**

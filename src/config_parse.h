@@ -60,6 +60,7 @@ typedef struct mnemon_config {
     int      http_max_connections;
     int      http_connection_timeout;     /* seconds idle before MHD reaps; 0 = no timeout */
     int      http_per_ip_connection_limit;/* per-IP cap; 0 = unlimited */
+    int      http_session_idle_timeout;   /* seconds idle before MCP session is reaped; 0 = never */
     char    *http_auth_token;
     char    *http_allow_ips;     /* comma-separated CIDR list, NULL = allow all */
     char    *tls_cert;

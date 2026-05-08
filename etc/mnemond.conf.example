@@ -72,6 +72,12 @@ connection_timeout = 120            # Seconds of idle before MHD reaps a connect
 per_ip_connection_limit = 0         # Max concurrent connections per client IP.
                                     # 0 = unlimited. Set to e.g. 8 to prevent a single
                                     # misbehaving client from consuming the whole pool.
+session_idle_timeout = 1800         # Seconds of MCP session inactivity before reaping.
+                                    # Most MCP clients never send DELETE on shutdown,
+                                    # so without this, the 256-session table would
+                                    # eventually fill from client restarts. Sessions
+                                    # with an active SSE stream are protected.
+                                    # 0 = disable (not recommended).
 auth_token =                        # Optional Bearer token for HTTP auth
 allow_ips =                         # Comma-separated CIDR allow list (empty = allow all)
                                     # Example: 192.168.1.0/24, 10.0.0.5, 172.16.0.0/12

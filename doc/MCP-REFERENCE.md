@@ -201,9 +201,14 @@ Configure TLS by setting `tls_cert` and `tls_key` in the `[http]` config section
 
 - Maximum concurrent sessions: 256
 - Sessions are tracked with creation time and last-active timestamps
+- Sessions are reaped after `[http] session_idle_timeout` seconds of inactivity (default 1800)
+- Sessions with an active SSE stream are protected; protection ends when the SSE TCP closes
+- At capacity, the least-recently-active session (without active SSE) is evicted to make room
 - Maximum concurrent TCP connections: `[http] max_connections` (default 32)
 - Idle TCP connections are reaped after `[http] connection_timeout` seconds (default 120)
 - Optional per-client-IP cap: `[http] per_ip_connection_limit` (default 0 = unlimited)
+
+Clients receiving `404 session not found` after a long idle period should re-`initialize` (this is a normal lifecycle event, not an error).
 
 ---
 
