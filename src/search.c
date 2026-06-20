@@ -492,32 +492,69 @@ mnemon_err_t mnemon_search_semantic(mnemon_storage_t *s,
         return MNEMON_ERR_OOM;
     }
 
+    /* The vector index holds per-chunk embeddings alongside whole-memory ones,
+     * so a hit may be a chunk UUID. Resolve it to the parent memory UUID (as
+     * the hybrid ranker does), dedup parents, and drop any vector that does not
+     * resolve to a live memory -- otherwise orphaned/chunk vectors surface as
+     * ghost results with empty content and tier "unknown". */
+    mnemon_graph_t *graph = mnemon_storage_graph(s);
+    MDB_txn *txn = NULL;
+    mnemon_graph_txn_begin(graph, MDB_RDONLY, &txn);
+
+    int n = 0;
     for (int i = 0; i < vr.count; i++) {
-        mnemon_result_t *r = &out->results[i];
+        uint8_t mem_id[16];
+        memcpy(mem_id, vr.results[i].id, 16);
+        if (txn) {
+            mnemon_chunk_meta_t cm;
+            if (mnemon_graph_get_chunk(graph, txn, vr.results[i].id, &cm)
+                == MNEMON_OK)
+                memcpy(mem_id, cm.parent_id, 16);
+        }
+
         mnemon_uuid_t uuid;
-        memcpy(uuid.bytes, vr.results[i].id, 16);
-        mnemon_uuid_to_string(&uuid, r->id, sizeof(r->id));
+        memcpy(uuid.bytes, mem_id, 16);
+        char id_str[37];
+        mnemon_uuid_to_string(&uuid, id_str, sizeof(id_str));
 
-        r->vector_score = 1.0f - vr.results[i].distance;
-        r->score = r->vector_score;
+        /* Dedup: a parent reached via several chunks appears once, best-first. */
+        bool dup = false;
+        for (int j = 0; j < n; j++)
+            if (strcmp(out->results[j].id, id_str) == 0) { dup = true; break; }
+        if (dup)
+            continue;
 
+        /* Read through the already-open txn -- opening a second read txn on
+         * this thread (via mnemon_get_memory) would fail under LMDB's per-
+         * thread reader slot and drop every result. */
         mnemon_memory_t mem;
         memset(&mem, 0, sizeof(mem));
-        if (mnemon_get_memory(s, vr.results[i].id, &mem) == MNEMON_OK) {
-            r->content = mem.content ? strdup(mem.content) : strdup("");
-            switch (mem.tier) {
-            case MNEMON_TIER_EPISODIC:   r->tier = strdup("episodic"); break;
-            case MNEMON_TIER_SEMANTIC:   r->tier = strdup("semantic"); break;
-            case MNEMON_TIER_PROCEDURAL: r->tier = strdup("procedural"); break;
-            }
+        mnemon_err_t ge = txn
+            ? mnemon_graph_get_memory(graph, txn, mem_id, &mem)
+            : mnemon_get_memory(s, mem_id, &mem);
+        if (ge != MNEMON_OK) {
             mnemon_memory_free(&mem);
-        } else {
-            r->content = strdup("");
-            r->tier = strdup("unknown");
+            continue; /* orphaned vector -- skip, do not emit a ghost */
         }
+
+        mnemon_result_t *r = &out->results[n];
+        memcpy(r->id, id_str, sizeof(id_str));
+        r->vector_score = 1.0f - vr.results[i].distance;
+        r->score = r->vector_score;
+        r->content = mem.content ? strdup(mem.content) : strdup("");
+        switch (mem.tier) {
+        case MNEMON_TIER_EPISODIC:   r->tier = strdup("episodic"); break;
+        case MNEMON_TIER_SEMANTIC:   r->tier = strdup("semantic"); break;
+        case MNEMON_TIER_PROCEDURAL: r->tier = strdup("procedural"); break;
+        }
+        mnemon_memory_free(&mem);
+        n++;
     }
 
-    out->count = vr.count;
+    if (txn)
+        mnemon_graph_txn_abort(txn);
+
+    out->count = n;
     out->truncated = false;
 
     mnemon_vector_results_free(&vr);

@@ -31,9 +31,6 @@
 /* Full package string */
 #define PACKAGE_STRING "@PROJECT_NAME@ @PROJECT_VERSION@"
 
-/* Git commit hash (short) -- empty if not in a git repo */
-#define PACKAGE_GIT_COMMIT "@MNEMON_GIT_COMMIT@"
-
 /* Bug report address */
 #define PACKAGE_BUGREPORT "@PACKAGE_BUGREPORT@"
 

@@ -581,10 +581,7 @@ static cJSON *tool_health_check(mnemon_storage_t *s, const cJSON *params)
     cJSON_AddBoolToObject(result, "embedding_model_loaded",
                           embed && mnemon_embed_available(embed));
     char version_str[64];
-    if (PACKAGE_GIT_COMMIT[0] != '\0')
-        snprintf(version_str, sizeof(version_str), "v%s (%s)", PACKAGE_VERSION, PACKAGE_GIT_COMMIT);
-    else
-        snprintf(version_str, sizeof(version_str), "v%s", PACKAGE_VERSION);
+    snprintf(version_str, sizeof(version_str), "v%s", PACKAGE_VERSION);
     cJSON_AddStringToObject(result, "version", version_str);
     cJSON_AddBoolToObject(result, "storage_ok", true);
     return result;
@@ -714,10 +711,11 @@ static cJSON *tool_search_entities(mnemon_storage_t *s, const cJSON *params)
     int top_k = json_int(params, "top_k", 10);
     if (top_k > 50) top_k = 50;
 
-    /* Search FTS5 for entities (source_type=1) */
+    /* Search FTS5 for entities only (source_type=1) so memory documents can't
+     * crowd entities out of the candidate window. */
     mnemon_fts_t *fts = mnemon_storage_fts(s);
     mnemon_fts_results_t fr = {0};
-    mnemon_fts_search(fts, query_text, top_k * 2, &fr);
+    mnemon_fts_search_typed(fts, query_text, 1, top_k * 2, &fr);
 
     cJSON *result = cJSON_CreateObject();
     cJSON *arr = cJSON_CreateArray();

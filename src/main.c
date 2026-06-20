@@ -71,10 +71,7 @@ typedef enum {
 
 static void print_version(void)
 {
-    if (PACKAGE_GIT_COMMIT[0] != '\0')
-        fprintf(stderr, "%s v%s (%s)\n", PACKAGE_NAME, PACKAGE_VERSION, PACKAGE_GIT_COMMIT);
-    else
-        fprintf(stderr, "%s v%s\n", PACKAGE_NAME, PACKAGE_VERSION);
+    fprintf(stderr, "%s v%s\n", PACKAGE_NAME, PACKAGE_VERSION);
 }
 
 static void print_usage(const char *progname)

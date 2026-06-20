@@ -403,6 +403,20 @@ void mnemon_event_list_free(mnemon_event_list_t *list)
     memset(list, 0, sizeof(*list));
 }
 
+/* True if p points at a bare ISO calendar date "YYYY-MM-DD". Short-circuits on
+ * the NUL terminator, so it never reads past the end of the string. */
+static bool looks_like_iso_date(const char *p)
+{
+    for (int i = 0; i < 10; i++) {
+        if (i == 4 || i == 7) {
+            if (p[i] != '-') return false;
+        } else if (!isdigit((unsigned char)p[i])) {
+            return false;
+        }
+    }
+    return true;
+}
+
 mnemon_err_t mnemon_extract_events(const char *text, int context_year,
                                    mnemon_event_list_t *out)
 {
@@ -418,18 +432,29 @@ mnemon_err_t mnemon_extract_events(const char *text, int context_year,
     size_t len = strlen(text);
 
     while (*p) {
-        /* Try to match a month name at this position */
         int adv = 0;
-        int month = match_month(p, &adv);
-        if (month == 0) {
-            p++;
-            continue;
+        int64_t date = 0;
+
+        /* ISO date (2026-06-10) takes priority -- match_month never sees a
+         * digit, so without this branch ISO dates were silently skipped. */
+        if (isdigit((unsigned char)*p) && looks_like_iso_date(p)) {
+            char buf[11];
+            memcpy(buf, p, 10);
+            buf[10] = '\0';
+            date = mnemon_parse_iso8601(buf);
+            adv = 10;
+        } else {
+            /* Otherwise try to match a natural-language month name here. */
+            int month = match_month(p, &adv);
+            if (month == 0) {
+                p++;
+                continue;
+            }
+            date = mnemon_parse_natural_date(p, context_year);
         }
 
-        /* Try parsing a full date starting here */
-        int64_t date = mnemon_parse_natural_date(p, context_year);
         if (date <= 0) {
-            p += adv;
+            p += (adv > 0 ? adv : 1);
             continue;
         }
 

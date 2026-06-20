@@ -338,18 +338,6 @@ endif()
 check_c_compiler_flag("-mavx2" HAVE_AVX2)
 check_c_compiler_flag("-mavx512f" HAVE_AVX512)
 
-# ======================================================================
-#  Git commit hash (embedded in --version output)
-# ======================================================================
-
-set(MNEMON_GIT_COMMIT "")
-execute_process(
-    COMMAND git rev-parse --short HEAD
-    WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
-    OUTPUT_VARIABLE MNEMON_GIT_COMMIT
-    OUTPUT_STRIP_TRAILING_WHITESPACE
-    ERROR_QUIET
-)
 
 # ======================================================================
 #  Generate config.h (autoconf AC_CONFIG_HEADERS equivalent)

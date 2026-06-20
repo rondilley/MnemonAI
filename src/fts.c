@@ -341,23 +341,38 @@ static char *sanitize_query(const char *input, enum fts_tier tier)
 
 /* Execute a single FTS5 MATCH query at a given tier. Returns result count. */
 static int fts_exec_tier(mnemon_fts_t *f, const char *query, enum fts_tier tier,
-                         int top_k, mnemon_fts_results_t *out)
+                         int source_type, int top_k, mnemon_fts_results_t *out)
 {
     char *sq = sanitize_query(query, tier);
     if (!sq) return 0;
 
+    /* source_type < 0 = any; otherwise restrict to memories (0) or entities (1)
+     * at the SQL level so one document class cannot crowd out the other in the
+     * top_k window. */
     sqlite3_stmt *stmt;
     int rc = sqlite3_prepare_v2(f->db,
-        "SELECT m.uuid, m.source_type, f.rank "
-        "FROM memory_fts f "
-        "JOIN fts_id_map m ON f.rowid = m.rowid "
-        "WHERE memory_fts MATCH ? "
-        "ORDER BY f.rank "
-        "LIMIT ?", -1, &stmt, NULL);
+        source_type < 0
+        ? "SELECT m.uuid, m.source_type, f.rank "
+          "FROM memory_fts f "
+          "JOIN fts_id_map m ON f.rowid = m.rowid "
+          "WHERE memory_fts MATCH ? "
+          "ORDER BY f.rank "
+          "LIMIT ?"
+        : "SELECT m.uuid, m.source_type, f.rank "
+          "FROM memory_fts f "
+          "JOIN fts_id_map m ON f.rowid = m.rowid "
+          "WHERE memory_fts MATCH ? AND m.source_type = ? "
+          "ORDER BY f.rank "
+          "LIMIT ?", -1, &stmt, NULL);
     if (rc != SQLITE_OK) { free(sq); return 0; }
 
     sqlite3_bind_text(stmt, 1, sq, -1, SQLITE_TRANSIENT);
-    sqlite3_bind_int(stmt, 2, top_k);
+    if (source_type < 0) {
+        sqlite3_bind_int(stmt, 2, top_k);
+    } else {
+        sqlite3_bind_int(stmt, 2, source_type);
+        sqlite3_bind_int(stmt, 3, top_k);
+    }
 
     int count = 0;
     while (sqlite3_step(stmt) == SQLITE_ROW && count < top_k) {
@@ -376,8 +391,9 @@ static int fts_exec_tier(mnemon_fts_t *f, const char *query, enum fts_tier tier,
     return count;
 }
 
-mnemon_err_t mnemon_fts_search(mnemon_fts_t *f, const char *query, int top_k,
-                               mnemon_fts_results_t *out)
+mnemon_err_t mnemon_fts_search_typed(mnemon_fts_t *f, const char *query,
+                                     int source_type, int top_k,
+                                     mnemon_fts_results_t *out)
 {
     if (!f || !query || !out) return MNEMON_ERR_INVALID_INPUT;
     memset(out, 0, sizeof(*out));
@@ -388,14 +404,20 @@ mnemon_err_t mnemon_fts_search(mnemon_fts_t *f, const char *query, int top_k,
 
     /* Tiered query strategy: AND (precise) -> NEAR/10 -> OR (broad).
      * Stop at the first tier that returns results. */
-    int count = fts_exec_tier(f, query, TIER_AND, k, out);
+    int count = fts_exec_tier(f, query, TIER_AND, source_type, k, out);
     if (count == 0)
-        count = fts_exec_tier(f, query, TIER_NEAR, k, out);
+        count = fts_exec_tier(f, query, TIER_NEAR, source_type, k, out);
     if (count == 0)
-        count = fts_exec_tier(f, query, TIER_OR, k, out);
+        count = fts_exec_tier(f, query, TIER_OR, source_type, k, out);
     out->count = count;
 
     return MNEMON_OK;
+}
+
+mnemon_err_t mnemon_fts_search(mnemon_fts_t *f, const char *query, int top_k,
+                               mnemon_fts_results_t *out)
+{
+    return mnemon_fts_search_typed(f, query, -1, top_k, out);
 }
 
 void mnemon_fts_results_free(mnemon_fts_results_t *r)

@@ -640,6 +640,115 @@ mnemon_err_t mnemon_graph_clear_chunks(mnemon_graph_t *g, MDB_txn *txn)
     return MNEMON_OK;
 }
 
+/* Delete the forward edge at fwd_key (40 bytes: source|type_hash|target) and
+ * its mirror in the reverse index. Both indexes are DUPSORT; deleting by key
+ * with NULL data removes all values for that key. */
+static void del_edge_both(mnemon_graph_t *g, MDB_txn *txn,
+                          const uint8_t fwd_key[40])
+{
+    MDB_val fk = {40, CONST_CAST(fwd_key)};
+    mdb_del(txn, g->dbi_edges, &fk, NULL);
+
+    /* Reverse key = target | type_hash | source -- a rearrangement of fwd. */
+    uint8_t rev[40];
+    memcpy(rev,      fwd_key + 24, 16); /* target */
+    memcpy(rev + 16, fwd_key + 16, 8);  /* type hash */
+    memcpy(rev + 24, fwd_key,      16); /* source */
+    MDB_val rk = {40, rev};
+    mdb_del(txn, g->dbi_edges_rev, &rk, NULL);
+}
+
+mnemon_err_t mnemon_graph_del_edges_for_entity(mnemon_graph_t *g, MDB_txn *txn,
+                                               const uint8_t entity_id[16],
+                                               size_t *deleted)
+{
+    if (!g || !txn || !entity_id) return MNEMON_ERR_INVALID_INPUT;
+    if (deleted) *deleted = 0;
+
+    MDB_cursor *cur;
+    int rc = mdb_cursor_open(txn, g->dbi_edges, &cur);
+    if (rc) { mnemon_err_set(MNEMON_ERR_LMDB, rc, "%s", mdb_strerror(rc));
+              return MNEMON_ERR_LMDB; }
+
+    /* Collect matching keys first; deleting during cursor iteration is unsafe. */
+    uint8_t (*keys)[40] = NULL;
+    size_t n = 0, cap = 0;
+    MDB_val key, val;
+    rc = mdb_cursor_get(cur, &key, &val, MDB_FIRST);
+    while (rc == 0) {
+        if (key.mv_size == 40) {
+            const uint8_t *k = key.mv_data;
+            if (memcmp(k, entity_id, 16) == 0 ||        /* source */
+                memcmp(k + 24, entity_id, 16) == 0) {   /* target */
+                if (n >= cap) {
+                    size_t nc = cap ? cap * 2 : 16;
+                    uint8_t (*p)[40] = realloc(keys, nc * 40);
+                    if (!p) break;
+                    keys = p; cap = nc;
+                }
+                memcpy(keys[n++], k, 40);
+            }
+        }
+        rc = mdb_cursor_get(cur, &key, &val, MDB_NEXT);
+    }
+    mdb_cursor_close(cur);
+
+    for (size_t i = 0; i < n; i++)
+        del_edge_both(g, txn, keys[i]);
+    free(keys);
+    if (deleted) *deleted = n;
+    return MNEMON_OK;
+}
+
+/* True if id exists as either an entity or a memory. */
+static bool graph_id_exists(mnemon_graph_t *g, MDB_txn *txn, const uint8_t id[16])
+{
+    MDB_val k = {16, CONST_CAST(id)}, v;
+    if (mdb_get(txn, g->dbi_entities, &k, &v) == 0) return true;
+    if (mdb_get(txn, g->dbi_memories, &k, &v) == 0) return true;
+    return false;
+}
+
+mnemon_err_t mnemon_graph_prune_orphan_edges(mnemon_graph_t *g, MDB_txn *txn,
+                                             size_t *pruned)
+{
+    if (!g || !txn) return MNEMON_ERR_INVALID_INPUT;
+    if (pruned) *pruned = 0;
+
+    MDB_cursor *cur;
+    int rc = mdb_cursor_open(txn, g->dbi_edges, &cur);
+    if (rc) { mnemon_err_set(MNEMON_ERR_LMDB, rc, "%s", mdb_strerror(rc));
+              return MNEMON_ERR_LMDB; }
+
+    uint8_t (*keys)[40] = NULL;
+    size_t n = 0, cap = 0;
+    MDB_val key, val;
+    rc = mdb_cursor_get(cur, &key, &val, MDB_FIRST);
+    while (rc == 0) {
+        if (key.mv_size == 40) {
+            const uint8_t *k = key.mv_data;
+            if (!graph_id_exists(g, txn, k) ||
+                !graph_id_exists(g, txn, k + 24)) {
+                if (n >= cap) {
+                    size_t nc = cap ? cap * 2 : 16;
+                    uint8_t (*p)[40] = realloc(keys, nc * 40);
+                    if (!p) break;
+                    keys = p; cap = nc;
+                }
+                memcpy(keys[n++], k, 40);
+            }
+        }
+        rc = mdb_cursor_get(cur, &key, &val, MDB_NEXT);
+    }
+    mdb_cursor_close(cur);
+
+    for (size_t i = 0; i < n; i++)
+        del_edge_both(g, txn, keys[i]);
+    free(keys);
+    if (pruned) *pruned = n;
+    return MNEMON_OK;
+}
+
 mnemon_err_t mnemon_graph_txn_begin(mnemon_graph_t *g, unsigned int flags, MDB_txn **txn)
 {
     int rc = mdb_txn_begin(g->env, NULL, flags, txn);

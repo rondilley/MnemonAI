@@ -36,6 +36,11 @@ mnemon_err_t mnemon_fts_update_entity(mnemon_fts_t *f, const mnemon_entity_t *e)
 
 mnemon_err_t mnemon_fts_search(mnemon_fts_t *f, const char *query, int top_k,
                                mnemon_fts_results_t *out);
+/* Like mnemon_fts_search but restricts to a document class:
+ * source_type 0 = memories, 1 = entities, <0 = any. */
+mnemon_err_t mnemon_fts_search_typed(mnemon_fts_t *f, const char *query,
+                                     int source_type, int top_k,
+                                     mnemon_fts_results_t *out);
 void         mnemon_fts_results_free(mnemon_fts_results_t *r);
 
 mnemon_err_t mnemon_fts_checkpoint(mnemon_fts_t *f);

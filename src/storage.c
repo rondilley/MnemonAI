@@ -661,6 +661,9 @@ mnemon_err_t mnemon_delete_entity(mnemon_storage_t *s, const uint8_t id[16])
         return err;
     }
 
+    /* Cascade: remove edges touching this entity so no dangling edges remain. */
+    mnemon_graph_del_edges_for_entity(s->graph, txn, id, NULL);
+
     err = mnemon_graph_txn_commit(txn);
     if (err != MNEMON_OK)
         return err;
@@ -920,7 +923,7 @@ mnemon_err_t mnemon_rebuild_indexes(mnemon_storage_t *s, const char *target)
         rc = mdb_cursor_open(txn, dbi, &cur);
         if (rc == 0) {
             MDB_val key, val;
-            int ent_count = 0;
+            int ent_count = 0, ent_backfilled = 0;
             rc = mdb_cursor_get(cur, &key, &val, MDB_FIRST);
             while (rc == 0) {
                 mnemon_entity_t ent = {0};
@@ -929,17 +932,35 @@ mnemon_err_t mnemon_rebuild_indexes(mnemon_storage_t *s, const char *target)
                 if (rebuild_fts)
                     mnemon_fts_index_entity(s->fts, &ent);
 
-                if (rebuild_vec && ent.embedding)
+                if (rebuild_vec && ent.embedding) {
                     mnemon_vector_add(s->vector, ent.id, ent.embedding,
                                       s->dimensions, true);
+                } else if (rebuild_vec && s->embed &&
+                           mnemon_embed_available(s->embed) &&
+                           ent.name && ent.name[0]) {
+                    /* Backfill: entities created before embed-on-create have no
+                     * stored embedding, leaving entity vector search empty.
+                     * Embed the name (as create_entity does) and index it. */
+                    int dims = mnemon_embed_dimensions(s->embed);
+                    float *emb = malloc((size_t)dims * sizeof(float));
+                    if (emb) {
+                        if (mnemon_embed_text(s->embed, ent.name,
+                                strlen(ent.name), emb, dims, false) == MNEMON_OK) {
+                            mnemon_vector_add(s->vector, ent.id, emb, dims, true);
+                            ent_backfilled++;
+                        }
+                        free(emb);
+                    }
+                }
 
                 ent_count++;
                 mnemon_entity_free(&ent);
                 rc = mdb_cursor_get(cur, &key, &val, MDB_NEXT);
             }
             mdb_cursor_close(cur);
-            mnemon_log(MNEMON_LOG_INFO, "rebuild: re-indexed %d entities",
-                       ent_count);
+            mnemon_log(MNEMON_LOG_INFO,
+                       "rebuild: re-indexed %d entities (%d embeddings backfilled)",
+                       ent_count, ent_backfilled);
         }
     }
 
@@ -965,6 +986,20 @@ mnemon_err_t mnemon_rebuild_indexes(mnemon_storage_t *s, const char *target)
                    "rebuild: re-chunked %zu long memories", chunk_parent_count);
     }
     free(chunk_parents);
+
+    /* Prune dangling edges whose endpoints no longer exist -- cleans up edges
+     * left behind by deletes that predate the entity-delete cascade. */
+    {
+        MDB_txn *etxn;
+        if (mnemon_graph_txn_begin(s->graph, 0, &etxn) == MNEMON_OK) {
+            size_t pruned = 0;
+            mnemon_graph_prune_orphan_edges(s->graph, etxn, &pruned);
+            mnemon_graph_txn_commit(etxn);
+            if (pruned)
+                mnemon_log(MNEMON_LOG_INFO,
+                           "rebuild: pruned %zu orphan edges", pruned);
+        }
+    }
 
     if (rebuild_fts)
         mnemon_fts_checkpoint(s->fts);

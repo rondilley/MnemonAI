@@ -98,4 +98,17 @@ mnemon_err_t mnemon_graph_get_chunks_by_parent(mnemon_graph_t *g, MDB_txn *txn,
 /* Empty the chunks DBI entirely (used during vector rebuild). */
 mnemon_err_t mnemon_graph_clear_chunks(mnemon_graph_t *g, MDB_txn *txn);
 
+/* Delete every edge (forward + reverse index) where entity_id is the source
+ * or the target. Used to cascade entity deletion so no dangling edges remain.
+ * *deleted (optional) receives the number of edges removed. */
+mnemon_err_t mnemon_graph_del_edges_for_entity(mnemon_graph_t *g, MDB_txn *txn,
+                                               const uint8_t entity_id[16],
+                                               size_t *deleted);
+
+/* Delete edges whose source or target no longer exists as an entity or
+ * memory. Cleans dangling edges left by older deletes. *pruned (optional)
+ * receives the count removed. */
+mnemon_err_t mnemon_graph_prune_orphan_edges(mnemon_graph_t *g, MDB_txn *txn,
+                                             size_t *pruned);
+
 #endif /* MNEMON_GRAPH_H */
