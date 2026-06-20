@@ -298,6 +298,23 @@ static cJSON *tool_delete_memory(mnemon_storage_t *s, const cJSON *params)
     return result;
 }
 
+static cJSON *tool_delete_entity(mnemon_storage_t *s, const cJSON *params)
+{
+    uint8_t id[16];
+    if (uuid_from_json(cJSON_GetObjectItemCaseSensitive(params, "id"), id) != 0) {
+        cJSON *e = cJSON_CreateObject();
+        cJSON_AddStringToObject(e, "error", "invalid id");
+        return e;
+    }
+
+    mnemon_err_t err = mnemon_delete_entity(s, id);
+    cJSON *result = cJSON_CreateObject();
+    cJSON_AddBoolToObject(result, "deleted", err == MNEMON_OK);
+    if (err != MNEMON_OK)
+        cJSON_AddStringToObject(result, "error", mnemon_strerror(err));
+    return result;
+}
+
 static cJSON *tool_search_hybrid(mnemon_storage_t *s, const cJSON *params)
 {
     mnemon_query_t q;
@@ -343,6 +360,27 @@ static cJSON *tool_search_keyword(mnemon_storage_t *s, const cJSON *params)
     return result;
 }
 
+/* True when the string is a bare calendar date ("2026-04-01") with no time
+ * component.  An upper bound expressed that way should include the whole day,
+ * so callers extend it to 23:59:59.999 rather than stopping at midnight. */
+static bool ts_is_date_only(const char *s)
+{
+    return s && !strchr(s, 'T') && !strchr(s, ' ') && !strchr(s, ':');
+}
+
+/* Milliseconds from the start of a day to its final instant. */
+#define MS_PER_DAY 86400000LL
+
+/* Current UTC year, used to default natural-language dates that omit a year
+ * (e.g. "January 10").  Derived at runtime so it never goes stale, unlike the
+ * hardcoded constant it replaced. */
+static int current_year(void)
+{
+    char buf[32];
+    mnemon_format_iso8601(mnemon_time_ms(), buf, sizeof(buf));
+    return (int)strtol(buf, NULL, 10);  /* leading "YYYY" before the '-' */
+}
+
 static cJSON *tool_search_temporal(mnemon_storage_t *s, const cJSON *params)
 {
     int64_t since = 0, until = 0;
@@ -350,6 +388,8 @@ static cJSON *tool_search_temporal(mnemon_storage_t *s, const cJSON *params)
     const char *until_str = json_str(params, "until", NULL);
     if (since_str) since = mnemon_parse_iso8601(since_str);
     if (until_str) until = mnemon_parse_iso8601(until_str);
+    /* Date-only upper bound covers the entire day. */
+    if (until > 0 && ts_is_date_only(until_str)) until += MS_PER_DAY - 1;
     int top_k = json_int(params, "top_k", 10);
 
     mnemon_result_set_t rs;
@@ -1537,7 +1577,7 @@ static cJSON *tool_extract_events(mnemon_storage_t *s, const cJSON *params)
         return e;
     }
 
-    int context_year = json_int(params, "context_year", 2023);
+    int context_year = json_int(params, "context_year", current_year());
     bool create_entities = json_bool(params, "create_entities", true);
 
     /* Optional memory_id: links extracted entities back to source memory */
@@ -1662,9 +1702,12 @@ static cJSON *tool_search_events(mnemon_storage_t *s, const cJSON *params)
 
     /* Also try natural date parsing for convenience */
     if (since_str && since == 0)
-        since = mnemon_parse_natural_date(since_str, 2023);
+        since = mnemon_parse_natural_date(since_str, current_year());
     if (until_str && until == 0)
-        until = mnemon_parse_natural_date(until_str, 2023);
+        until = mnemon_parse_natural_date(until_str, current_year());
+
+    /* Date-only upper bound covers the entire day. */
+    if (until > 0 && ts_is_date_only(until_str)) until += MS_PER_DAY - 1;
 
     mnemon_result_set_t rs = {0};
     mnemon_search_events(s, since, until, name, top_k, &rs);
@@ -1688,7 +1731,7 @@ static cJSON *tool_calculate_duration(mnemon_storage_t *s, const cJSON *params)
         return e;
     }
 
-    int context_year = json_int(params, "context_year", 2023);
+    int context_year = json_int(params, "context_year", current_year());
 
     /* Parse dates -- try ISO8601 first, then natural language */
     int64_t from_ms = mnemon_parse_iso8601(from_str);
@@ -1745,6 +1788,10 @@ static const mnemon_tool_def_t tool_defs[] = {
 
     {"delete_memory", tool_delete_memory,
      "Soft-delete a memory",
+     SCHEMA("{\"type\":\"object\",\"properties\":{\"id\":{\"type\":\"string\"}},\"required\":[\"id\"]}")},
+
+    {"delete_entity", tool_delete_entity,
+     "Delete an entity (removes it from the graph, FTS, and vector indexes)",
      SCHEMA("{\"type\":\"object\",\"properties\":{\"id\":{\"type\":\"string\"}},\"required\":[\"id\"]}")},
 
     {"search_hybrid", tool_search_hybrid,

@@ -87,5 +87,15 @@ mnemon_err_t mnemon_graph_put_chunk(mnemon_graph_t *g, MDB_txn *txn,
 mnemon_err_t mnemon_graph_get_chunk(mnemon_graph_t *g, MDB_txn *txn,
                                     const uint8_t chunk_id[16],
                                     mnemon_chunk_meta_t *out);
+mnemon_err_t mnemon_graph_del_chunk(mnemon_graph_t *g, MDB_txn *txn,
+                                    const uint8_t chunk_id[16]);
+/* Collect the chunk UUIDs whose parent is parent_id.  Scans the chunks DBI;
+ * writes up to max_ids 16-byte IDs into out_ids and sets *count. */
+mnemon_err_t mnemon_graph_get_chunks_by_parent(mnemon_graph_t *g, MDB_txn *txn,
+                                               const uint8_t parent_id[16],
+                                               uint8_t (*out_ids)[16],
+                                               size_t max_ids, size_t *count);
+/* Empty the chunks DBI entirely (used during vector rebuild). */
+mnemon_err_t mnemon_graph_clear_chunks(mnemon_graph_t *g, MDB_txn *txn);
 
 #endif /* MNEMON_GRAPH_H */

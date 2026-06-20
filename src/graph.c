@@ -579,6 +579,67 @@ mnemon_err_t mnemon_graph_get_chunk(mnemon_graph_t *g, MDB_txn *txn,
     return MNEMON_OK;
 }
 
+mnemon_err_t mnemon_graph_del_chunk(mnemon_graph_t *g, MDB_txn *txn,
+                                    const uint8_t chunk_id[16])
+{
+    if (!g || !txn || !chunk_id) return MNEMON_ERR_INVALID_INPUT;
+
+    MDB_val k = {16, CONST_CAST(chunk_id)};
+    int rc = mdb_del(txn, g->dbi_chunks, &k, NULL);
+    if (rc == MDB_NOTFOUND) return MNEMON_ERR_NOT_FOUND;
+    if (rc) {
+        mnemon_err_set(MNEMON_ERR_LMDB, rc, "%s", mdb_strerror(rc));
+        return MNEMON_ERR_LMDB;
+    }
+    return MNEMON_OK;
+}
+
+mnemon_err_t mnemon_graph_get_chunks_by_parent(mnemon_graph_t *g, MDB_txn *txn,
+                                               const uint8_t parent_id[16],
+                                               uint8_t (*out_ids)[16],
+                                               size_t max_ids, size_t *count)
+{
+    if (!g || !txn || !parent_id || !out_ids || !count)
+        return MNEMON_ERR_INVALID_INPUT;
+
+    *count = 0;
+
+    MDB_cursor *cur;
+    int rc = mdb_cursor_open(txn, g->dbi_chunks, &cur);
+    if (rc) {
+        mnemon_err_set(MNEMON_ERR_LMDB, rc, "%s", mdb_strerror(rc));
+        return MNEMON_ERR_LMDB;
+    }
+
+    /* Chunk keys are random chunk UUIDs (not parent-prefixed), so the parent
+     * link lives in the value (first 16 bytes).  Full scan + filter. */
+    MDB_val key, val;
+    rc = mdb_cursor_get(cur, &key, &val, MDB_FIRST);
+    while (rc == 0 && *count < max_ids) {
+        if (key.mv_size == 16 && val.mv_size >= 16 &&
+            memcmp(val.mv_data, parent_id, 16) == 0) {
+            memcpy(out_ids[*count], key.mv_data, 16);
+            (*count)++;
+        }
+        rc = mdb_cursor_get(cur, &key, &val, MDB_NEXT);
+    }
+    mdb_cursor_close(cur);
+    return MNEMON_OK;
+}
+
+mnemon_err_t mnemon_graph_clear_chunks(mnemon_graph_t *g, MDB_txn *txn)
+{
+    if (!g || !txn) return MNEMON_ERR_INVALID_INPUT;
+
+    /* mdb_drop with del=0 empties the DBI but keeps it open. */
+    int rc = mdb_drop(txn, g->dbi_chunks, 0);
+    if (rc) {
+        mnemon_err_set(MNEMON_ERR_LMDB, rc, "%s", mdb_strerror(rc));
+        return MNEMON_ERR_LMDB;
+    }
+    return MNEMON_OK;
+}
+
 mnemon_err_t mnemon_graph_txn_begin(mnemon_graph_t *g, unsigned int flags, MDB_txn **txn)
 {
     int rc = mdb_txn_begin(g->env, NULL, flags, txn);

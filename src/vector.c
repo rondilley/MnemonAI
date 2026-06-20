@@ -312,6 +312,38 @@ mnemon_err_t mnemon_vector_remove(mnemon_vector_t *v, const uint8_t id[16],
     return MNEMON_OK;
 }
 
+mnemon_err_t mnemon_vector_clear(mnemon_vector_t *v, bool entities)
+{
+    usearch_error_t err = NULL;
+    usearch_index_t fresh;
+
+    if (!v) return MNEMON_ERR_INVALID_INPUT;
+
+    /* Build the replacement index before taking the write lock so a failure
+     * leaves the existing index intact. */
+    fresh = create_index(v->dimensions, &err);
+    if (err) {
+        mnemon_err_set(MNEMON_ERR_USEARCH, 0, "clear init: %s", err);
+        return MNEMON_ERR_USEARCH;
+    }
+
+    pthread_rwlock_wrlock(&v->rwlock);
+    if (entities) {
+        if (v->ent_idx) usearch_free(v->ent_idx, &err);
+        v->ent_idx = fresh;
+        keymap_free(&v->ent_map);
+        keymap_init(&v->ent_map);
+    } else {
+        if (v->mem_idx) usearch_free(v->mem_idx, &err);
+        v->mem_idx = fresh;
+        keymap_free(&v->mem_map);
+        keymap_init(&v->mem_map);
+    }
+    pthread_rwlock_unlock(&v->rwlock);
+
+    return MNEMON_OK;
+}
+
 mnemon_err_t mnemon_vector_search(mnemon_vector_t *v, const float *query,
                                   int dimensions, int top_k,
                                   bool search_entities,

@@ -63,8 +63,18 @@ int64_t mnemon_parse_iso8601(const char *str)
     struct tm tm;
 
     if (!str) return 0;
-    if (sscanf(str, "%d-%d-%dT%d:%d:%d", &y, &mo, &d, &h, &mi, &s) < 6)
-        return 0;
+
+    /* Accept partial timestamps.  A bare date ("2026-04-01") or a date with
+     * minute precision ("2026-04-01T13:30") is valid; missing time components
+     * default to 0 (start of day).  Both 'T' and space date/time separators
+     * are accepted.  Requiring a full hh:mm:ss previously caused date-only
+     * since/until bounds to silently parse to 0, disabling the filter. */
+    h = mi = s = 0;
+    if (sscanf(str, "%d-%d-%dT%d:%d:%d", &y, &mo, &d, &h, &mi, &s) < 3) {
+        h = mi = s = 0;
+        if (sscanf(str, "%d-%d-%d %d:%d:%d", &y, &mo, &d, &h, &mi, &s) < 3)
+            return 0;
+    }
 
     memset(&tm, 0, sizeof(tm));
     tm.tm_year = y - 1900;

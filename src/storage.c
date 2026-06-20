@@ -326,6 +326,42 @@ static void store_chunks(mnemon_storage_t *s, const mnemon_memory_t *mem)
     free(emb);
 }
 
+/* Upper bound on chunks per memory -- matches the chunks[] buffer in
+ * store_chunks(), so a parent never has more chunks than this. */
+#define MAX_CHUNKS_PER_PARENT 128
+
+/* Remove every chunk vector and chunk-metadata row belonging to a parent
+ * memory.  Without this, deleting a chunked memory leaves its chunk vectors
+ * orphaned in the usearch index (they outlive the parent forever). */
+static void delete_chunks_for_parent(mnemon_storage_t *s,
+                                     const uint8_t parent_id[16])
+{
+    uint8_t chunk_ids[MAX_CHUNKS_PER_PARENT][16];
+    size_t n = 0;
+
+    MDB_txn *rtxn;
+    if (mnemon_graph_txn_begin(s->graph, MDB_RDONLY, &rtxn) != MNEMON_OK)
+        return;
+    mnemon_graph_get_chunks_by_parent(s->graph, rtxn, parent_id,
+                                      chunk_ids, MAX_CHUNKS_PER_PARENT, &n);
+    mnemon_graph_txn_abort(rtxn);
+
+    if (n == 0)
+        return;
+
+    /* Drop chunk vectors from the index. */
+    for (size_t i = 0; i < n; i++)
+        mnemon_vector_remove(s->vector, chunk_ids[i], false);
+
+    /* Drop chunk metadata from LMDB. */
+    MDB_txn *wtxn;
+    if (mnemon_graph_txn_begin(s->graph, 0, &wtxn) == MNEMON_OK) {
+        for (size_t i = 0; i < n; i++)
+            mnemon_graph_del_chunk(s->graph, wtxn, chunk_ids[i]);
+        mnemon_graph_txn_commit(wtxn);
+    }
+}
+
 /*
  * Store a memory through the 5-step write sequence:
  *   1. Write intent
@@ -483,6 +519,15 @@ mnemon_err_t mnemon_update_memory(mnemon_storage_t *s, const uint8_t id[16],
         mnemon_vector_add(s->vector, id, mem.embedding, s->dimensions, false);
     }
 
+    /* Content changed -> chunk boundaries and text changed, so the old chunk
+     * vectors/metadata are stale.  Drop them and re-chunk from the new
+     * content, mirroring store_memory().  (When only the embedding changed,
+     * chunk text is unchanged, so re-chunking is unnecessary.) */
+    if (new_content) {
+        delete_chunks_for_parent(s, id);
+        store_chunks(s, &mem);
+    }
+
     mnemon_memory_free(&mem);
     return MNEMON_OK;
 }
@@ -522,8 +567,9 @@ mnemon_err_t mnemon_delete_memory(mnemon_storage_t *s, const uint8_t id[16])
     mnemon_fts_remove(s->fts, id, 0);
     mnemon_fts_checkpoint(s->fts);
 
-    /* Step 4: Remove from usearch */
+    /* Step 4: Remove from usearch (whole-memory vector + any chunk vectors) */
     mnemon_vector_remove(s->vector, id, false);
+    delete_chunks_for_parent(s, id);
 
     /* Step 5: Delete intent */
     err = mnemon_graph_txn_begin(s->graph, 0, &txn);
@@ -800,6 +846,24 @@ mnemon_err_t mnemon_rebuild_indexes(mnemon_storage_t *s, const char *target)
     /* Clear target indexes */
     if (rebuild_fts)
         mnemon_fts_clear(s->fts);
+    if (rebuild_vec) {
+        mnemon_vector_clear(s->vector, false);  /* memory + chunk vectors */
+        mnemon_vector_clear(s->vector, true);   /* entity vectors */
+        /* Chunk metadata is regenerated from scratch below, so drop the old
+         * rows; otherwise they would point at vectors we just cleared. */
+        MDB_txn *ctxn;
+        if (mnemon_graph_txn_begin(s->graph, 0, &ctxn) == MNEMON_OK) {
+            mnemon_graph_clear_chunks(s->graph, ctxn);
+            mnemon_graph_txn_commit(ctxn);
+        }
+    }
+
+    /* IDs of memories whose content is long enough to be chunked.  Chunk
+     * re-indexing happens after the scan txn closes, because store_chunks()
+     * opens its own write transactions and LMDB forbids a write txn while a
+     * read txn is held on the same thread. */
+    uint8_t (*chunk_parents)[16] = NULL;
+    size_t chunk_parent_count = 0, chunk_parent_cap = 0;
 
     /* Open a single LMDB read transaction for the full scan */
     MDB_txn *txn;
@@ -827,6 +891,18 @@ mnemon_err_t mnemon_rebuild_indexes(mnemon_storage_t *s, const char *target)
                 if (rebuild_vec && mem.embedding)
                     mnemon_vector_add(s->vector, mem.id, mem.embedding,
                                       s->dimensions, false);
+
+                /* Note long memories for chunk re-indexing after the scan. */
+                if (rebuild_vec && mem.content &&
+                    strlen(mem.content) >= CHUNK_MIN_CONTENT) {
+                    if (chunk_parent_count >= chunk_parent_cap) {
+                        size_t nc = chunk_parent_cap ? chunk_parent_cap * 2 : 64;
+                        uint8_t (*p)[16] = realloc(chunk_parents, nc * 16);
+                        if (p) { chunk_parents = p; chunk_parent_cap = nc; }
+                    }
+                    if (chunk_parent_count < chunk_parent_cap)
+                        memcpy(chunk_parents[chunk_parent_count++], mem.id, 16);
+                }
 
                 mem_count++;
                 mnemon_memory_free(&mem);
@@ -868,6 +944,27 @@ mnemon_err_t mnemon_rebuild_indexes(mnemon_storage_t *s, const char *target)
     }
 
     mnemon_graph_txn_abort(txn);
+
+    /* Re-generate chunk vectors + metadata for long memories.  Done outside
+     * the scan txn because store_chunks() opens its own write transactions. */
+    if (rebuild_vec && chunk_parents) {
+        for (size_t i = 0; i < chunk_parent_count; i++) {
+            MDB_txn *mtxn;
+            if (mnemon_graph_txn_begin(s->graph, MDB_RDONLY, &mtxn) != MNEMON_OK)
+                continue;
+            mnemon_memory_t mem = {0};
+            mnemon_err_t ge = mnemon_graph_get_memory(s->graph, mtxn,
+                                                      chunk_parents[i], &mem);
+            mnemon_graph_txn_abort(mtxn);
+            if (ge == MNEMON_OK) {
+                store_chunks(s, &mem);
+                mnemon_memory_free(&mem);
+            }
+        }
+        mnemon_log(MNEMON_LOG_INFO,
+                   "rebuild: re-chunked %zu long memories", chunk_parent_count);
+    }
+    free(chunk_parents);
 
     if (rebuild_fts)
         mnemon_fts_checkpoint(s->fts);

@@ -34,6 +34,10 @@ mnemon_err_t mnemon_vector_add(mnemon_vector_t *v, const uint8_t id[16],
                                bool is_entity);
 mnemon_err_t mnemon_vector_remove(mnemon_vector_t *v, const uint8_t id[16],
                                   bool is_entity);
+/* Empty one index (memory or entity) and its key map.  Used by
+ * rebuild_indexes to discard stale/orphaned vectors before re-adding from
+ * the LMDB source of truth. */
+mnemon_err_t mnemon_vector_clear(mnemon_vector_t *v, bool entities);
 mnemon_err_t mnemon_vector_search(mnemon_vector_t *v, const float *query,
                                   int dimensions, int top_k,
                                   bool search_entities,

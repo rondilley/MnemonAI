@@ -108,6 +108,7 @@ typedef struct {
     char     method[12];
     char     ip[48];
     char     tool_name[64];     /* set by handle_post when known */
+    char     rpc_id[40];        /* JSON-RPC id (string/number) for correlation */
     bool     in_flight_counted; /* did we increment in_flight_requests? */
 } request_state_t;
 
@@ -432,6 +433,26 @@ static enum MHD_Result handle_post(mnemon_http_t *h,
         snprintf(rs->tool_name, sizeof(rs->tool_name), "%s",
                  method->valuestring);
     }
+
+    /* Capture the JSON-RPC id (string or number) so an arrival line can be
+     * correlated with its completion line -- the id survives even on frames
+     * where the tool name does not. */
+    const cJSON *id_item = cJSON_GetObjectItemCaseSensitive(request, "id");
+    if (cJSON_IsString(id_item) && id_item->valuestring)
+        snprintf(rs->rpc_id, sizeof(rs->rpc_id), "%s", id_item->valuestring);
+    else if (cJSON_IsNumber(id_item))
+        snprintf(rs->rpc_id, sizeof(rs->rpc_id), "%lld",
+                 (long long)id_item->valuedouble);
+    /* else: notification (no id) -- leave rpc_id empty */
+
+    /* Arrival log: confirms the request reached mnemond and when, before any
+     * dispatch work. Pairs with the completion line via method/tool/id. */
+    mnemon_log(MNEMON_LOG_INFO,
+               "HTTP: request recv method=%s tool=%s id=%s ip=%s body=%zu",
+               rs->method,
+               rs->tool_name[0] ? rs->tool_name : "-",
+               rs->rpc_id[0] ? rs->rpc_id : "-",
+               get_client_ip(conn), rs->len);
 
     /* Get or validate session */
     const char *session_id = MHD_lookup_connection_value(
@@ -862,23 +883,24 @@ static void request_completed(void *cls, struct MHD_Connection *conn,
 
     int64_t duration = mnemon_time_ms() - rs->started_ms;
     const char *tool = rs->tool_name[0] ? rs->tool_name : "-";
+    const char *id = rs->rpc_id[0] ? rs->rpc_id : "-";
 
     if (h && duration >= SLOW_REQUEST_MS) {
         atomic_fetch_add(&h->slow_requests, 1);
         mnemon_log(MNEMON_LOG_WARNING,
-            "HTTP: slow request method=%s tool=%s ip=%s duration=%" PRId64
+            "HTTP: slow request method=%s tool=%s id=%s ip=%s duration=%" PRId64
             "ms in_flight=%d toe=%d",
-            rs->method, tool, rs->ip, duration, after, (int)toe);
+            rs->method, tool, id, rs->ip, duration, after, (int)toe);
     } else if (toe != MHD_REQUEST_TERMINATED_COMPLETED_OK) {
         mnemon_log(MNEMON_LOG_WARNING,
-            "HTTP: request aborted method=%s tool=%s ip=%s duration=%" PRId64
+            "HTTP: request aborted method=%s tool=%s id=%s ip=%s duration=%" PRId64
             "ms in_flight=%d toe=%d",
-            rs->method, tool, rs->ip, duration, after, (int)toe);
+            rs->method, tool, id, rs->ip, duration, after, (int)toe);
     } else {
         mnemon_log(MNEMON_LOG_DEBUG,
-            "HTTP: request method=%s tool=%s ip=%s duration=%" PRId64
+            "HTTP: request method=%s tool=%s id=%s ip=%s duration=%" PRId64
             "ms in_flight=%d",
-            rs->method, tool, rs->ip, duration, after);
+            rs->method, tool, id, rs->ip, duration, after);
     }
 
     free(rs->data);
