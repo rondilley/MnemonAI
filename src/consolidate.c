@@ -24,6 +24,7 @@
 #include "consolidate.h"
 #include "storage.h"
 #include "graph.h"
+#include "fts.h"
 #include "vector.h"
 #include "embed.h"
 #include "hardware.h"
@@ -324,7 +325,12 @@ mnemon_err_t mnemon_consolidate(mnemon_storage_t *s,
         free(refs);
     }
 
-    /* Step 5: Mark candidates as consolidated in LMDB */
+    /* Step 5: Mark candidates as consolidated in LMDB, keeping the derived FTS
+     * index in sync. The promoted record is rewritten in LMDB (the source of
+     * truth) and re-indexed in FTS so callers never have to run a manual
+     * rebuild after consolidation. The vector embedding is content-derived and
+     * content is unchanged, so it stays valid as-is. */
+    mnemon_fts_t *fts = mnemon_storage_fts(s);
     int consolidated = 0;
     for (int i = 0; i < candidate_count; i++) {
         MDB_txn *wtxn;
@@ -337,12 +343,16 @@ mnemon_err_t mnemon_consolidate(mnemon_storage_t *s,
             mem.tier = MNEMON_TIER_SEMANTIC;
             mnemon_graph_put_memory(graph, wtxn, &mem);
             mnemon_graph_txn_commit(wtxn);
+            if (fts)
+                mnemon_fts_update_memory(fts, &mem);  /* keep FTS authoritative */
             consolidated++;
         } else {
             mnemon_graph_txn_abort(wtxn);
         }
         mnemon_memory_free(&mem);
     }
+    if (fts && consolidated > 0)
+        mnemon_fts_checkpoint(fts);
 
     free(candidates);
 

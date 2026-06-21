@@ -160,17 +160,40 @@ mnemon_err_t mnemon_get_state_at_time(mnemon_storage_t *s,
     if (!s || !entity_id || !out)
         return MNEMON_ERR_INVALID_INPUT;
 
-    /* Get current entity state and check if it existed at the given time */
-    mnemon_err_t err = mnemon_get_entity(s, entity_id, out);
+    memset(out, 0, sizeof(*out));
+
+    mnemon_graph_t *graph = mnemon_storage_graph(s);
+    MDB_txn *txn;
+    if (mnemon_graph_txn_begin(graph, MDB_RDONLY, &txn) != MNEMON_OK)
+        return MNEMON_ERR_LMDB;
+
+    /* Point-in-time: the snapshot with the greatest valid_from <= timestamp.
+     * load_versions returns ascending order, so that is the last in range. */
+    mnemon_entity_t *vers = NULL;
+    uint32_t n = 0;
+    mnemon_graph_load_versions(graph, txn, entity_id, 0, timestamp, &vers, &n);
+
+    if (n > 0) {
+        *out = vers[n - 1];                 /* transfer ownership of newest */
+        for (uint32_t i = 0; i + 1 < n; i++)
+            mnemon_entity_free(&vers[i]);
+        free(vers);
+        mnemon_graph_txn_abort(txn);
+        return MNEMON_OK;
+    }
+    free(vers);
+
+    /* No version history (e.g. legacy entity stored before versioning): fall
+     * back to current state, gated on creation time. */
+    mnemon_err_t err = mnemon_graph_get_entity(graph, txn, entity_id, out);
+    mnemon_graph_txn_abort(txn);
     if (err != MNEMON_OK)
         return err;
-
     if (out->created_at > timestamp) {
         mnemon_entity_free(out);
         memset(out, 0, sizeof(*out));
         return MNEMON_ERR_NOT_FOUND;
     }
-
     return MNEMON_OK;
 }
 
@@ -184,37 +207,46 @@ mnemon_err_t mnemon_get_history(mnemon_storage_t *s,
 
     memset(out, 0, sizeof(*out));
 
-    /* Get the current version of the entity */
+    mnemon_graph_t *graph = mnemon_storage_graph(s);
+    MDB_txn *txn;
+    if (mnemon_graph_txn_begin(graph, MDB_RDONLY, &txn) != MNEMON_OK)
+        return MNEMON_ERR_LMDB;
+
+    /* All snapshots in the time window, ascending by valid_from. */
+    mnemon_entity_t *vers = NULL;
+    uint32_t n = 0;
+    mnemon_graph_load_versions(graph, txn, entity_id, since, until, &vers, &n);
+
+    if (n > 0) {
+        out->versions = vers;
+        out->count = n;
+        mnemon_graph_txn_abort(txn);
+        return MNEMON_OK;
+    }
+    free(vers);
+
+    /* No recorded history (legacy entity): fall back to current state as a
+     * single version, honoring the time filter. */
     mnemon_entity_t current;
     memset(&current, 0, sizeof(current));
-    mnemon_err_t err = mnemon_get_entity(s, entity_id, &current);
+    mnemon_err_t err = mnemon_graph_get_entity(graph, txn, entity_id, &current);
+    mnemon_graph_txn_abort(txn);
     if (err != MNEMON_OK)
         return err;
 
-    /* Apply time filter */
     if ((since > 0 && current.updated_at < since) ||
         (until > 0 && current.created_at > until)) {
         mnemon_entity_free(&current);
-        return MNEMON_OK; /* Empty result within time window */
+        return MNEMON_OK; /* empty within window */
     }
 
-    /* Also scan for edges that were created/expired to build a change history */
-    mnemon_edge_list_t edges = {0};
-    mnemon_get_edges_from(s, entity_id, NULL, &edges);
-
-    /* Count versions: 1 for current entity + edges with temporal changes */
-    uint32_t version_count = 1;
-    out->versions = calloc(version_count, sizeof(mnemon_entity_t));
+    out->versions = calloc(1, sizeof(mnemon_entity_t));
     if (!out->versions) {
         mnemon_entity_free(&current);
-        mnemon_edge_list_free(&edges);
         return MNEMON_ERR_OOM;
     }
-
-    out->versions[0] = current; /* Transfer ownership */
-    out->count = version_count;
-
-    mnemon_edge_list_free(&edges);
+    out->versions[0] = current; /* transfer ownership */
+    out->count = 1;
     return MNEMON_OK;
 }
 

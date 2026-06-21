@@ -606,6 +606,21 @@ if(BUILD_TESTING)
             TIMEOUT 120
         )
 
+        # MCP HTTP transport with the real embedding model loaded (validates
+        # vector/semantic paths that mcp_http stubs with model_path=none).
+        # Skips (exit 77) when the model is absent, so it never fails on CI.
+        add_test(
+            NAME    mcp_http_embeddings
+            COMMAND "${Python3_EXECUTABLE}"
+                    "${CMAKE_SOURCE_DIR}/test/test_all_tools_http.py"
+            WORKING_DIRECTORY "${CMAKE_BINARY_DIR}"
+        )
+        set_tests_properties(mcp_http_embeddings PROPERTIES
+            LABELS "python;integration;embeddings"
+            SKIP_RETURN_CODE 77
+            TIMEOUT 240
+        )
+
         # Performance benchmarks
         add_test(
             NAME    mcp_perf

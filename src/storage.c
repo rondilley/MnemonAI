@@ -25,6 +25,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
+#include <ctype.h>
 #include <sys/stat.h>
 #include <errno.h>
 
@@ -41,6 +42,7 @@
 #include "hardware.h"
 #include "id.h"
 #include "log.h"
+#include "memory.h"
 #include "config_parse.h"
 
 typedef struct mnemon_reader_pool mnemon_reader_pool_t;
@@ -173,6 +175,49 @@ mnemon_err_t mnemon_storage_open(mnemon_storage_t **out,
     if (err != MNEMON_OK) {
         mnemon_log(MNEMON_LOG_WARNING,
                    "intent replay had errors: %s", mnemon_err_msg());
+    }
+
+    /* One-shot migration: backfill creation-time version baselines for entities
+     * that predate bi-temporal versioning. Guarded by a versioned meta flag so
+     * it runs once per algorithm version. The backfill is idempotent (skips
+     * entities already anchored at created_at), but the flag avoids re-scanning
+     * every entity on every startup. Bump BACKFILL_VERSION when the backfill
+     * logic changes so the corrected pass re-runs. (v2: fixed a valid_from bump
+     * that mis-dated baselines for entities with a later snapshot. v3: prune the
+     * mis-keyed baseline duplicates that v1 left behind.) */
+    {
+        const char *BACKFILL_VERSION = "3";
+        MDB_txn *mtxn;
+        char flag[8] = {0};
+        bool current = false;
+        if (mnemon_graph_txn_begin(s->graph, MDB_RDONLY, &mtxn) == MNEMON_OK) {
+            if (mnemon_graph_get_meta(s->graph, mtxn, "versions_backfilled",
+                                      flag, sizeof(flag)) == MNEMON_OK)
+                current = (strcmp(flag, BACKFILL_VERSION) == 0);
+            mnemon_graph_txn_abort(mtxn);
+        }
+        if (!current) {
+            /* Remove mis-keyed backfill duplicates (valid_from far from the
+             * snapshot's own updated_at), then backfill any still-missing
+             * creation baselines. 1s tolerance keeps legitimate same-ms bumps. */
+            if (mnemon_graph_txn_begin(s->graph, 0, &mtxn) == MNEMON_OK) {
+                size_t pruned = 0;
+                mnemon_graph_prune_miskeyed_versions(s->graph, mtxn, 1000,
+                                                     &pruned);
+                mnemon_graph_txn_commit(mtxn);
+                if (pruned)
+                    mnemon_log(MNEMON_LOG_INFO,
+                               "version cleanup: pruned %zu mis-keyed baselines",
+                               pruned);
+            }
+            size_t n = 0;
+            mnemon_backfill_versions(s, &n);
+            if (mnemon_graph_txn_begin(s->graph, 0, &mtxn) == MNEMON_OK) {
+                mnemon_graph_put_meta(s->graph, mtxn, "versions_backfilled",
+                                      BACKFILL_VERSION);
+                mnemon_graph_txn_commit(mtxn);
+            }
+        }
     }
 
     *out = s;
@@ -600,18 +645,29 @@ mnemon_err_t mnemon_store_entity(mnemon_storage_t *s, mnemon_entity_t *e)
         return err;
     }
 
+    /* Record an immutable version snapshot in the same transaction so entity
+     * history is atomic with the write (bi-temporal versioning). */
+    {
+        mnemon_uuid_t vu;
+        mnemon_uuid_generate(&vu);
+        mnemon_graph_put_version(s->graph, txn, vu.bytes, e);
+    }
+
     err = mnemon_graph_txn_commit(txn);
     if (err != MNEMON_OK)
         return err;
 
-    /* Index in FTS5 */
+    /* Index in FTS5. Remove any prior entity doc first so re-stores (e.g.
+     * add_observation) replace rather than duplicate the FTS entry. */
+    mnemon_fts_remove(s->fts, e->id, 1);
     err = mnemon_fts_index_entity(s->fts, e);
     if (err != MNEMON_OK)
         mnemon_log(MNEMON_LOG_ERROR, "FTS5 entity index failed: %s",
                    mnemon_err_msg());
 
-    /* Index in usearch */
+    /* Index in usearch (remove-then-add so re-stores replace, not duplicate). */
     if (e->embedding) {
+        mnemon_vector_remove(s->vector, e->id, true);
         err = mnemon_vector_add(s->vector, e->id, e->embedding,
                                 s->dimensions, true);
         if (err != MNEMON_OK)
@@ -641,6 +697,397 @@ mnemon_err_t mnemon_store_edge(mnemon_storage_t *s, const mnemon_edge_t *e)
     }
 
     return mnemon_graph_txn_commit(txn);
+}
+
+/* Case-insensitive whole-word/phrase containment: does haystack contain needle
+ * bounded by non-alphanumeric characters (or string ends)? Avoids "Ron"
+ * matching inside "Bronson". */
+static bool content_mentions(const char *haystack, const char *needle)
+{
+    size_t nlen = strlen(needle);
+    if (nlen < 3) return false;
+    const char *p = haystack;
+    while ((p = strcasestr(p, needle)) != NULL) {
+        bool left_ok  = (p == haystack) || !isalnum((unsigned char)p[-1]);
+        char after    = p[nlen];
+        bool right_ok = (after == '\0') || !isalnum((unsigned char)after);
+        if (left_ok && right_ok)
+            return true;
+        p += 1;
+    }
+    return false;
+}
+
+/* Connect entities to the memories that mention them by name, creating
+ * "mentioned_in" edges (entity -> memory). Idempotent: existing edges are
+ * skipped, so it can be re-run as memories/entities grow. */
+mnemon_err_t mnemon_link_entities(mnemon_storage_t *s, size_t *created)
+{
+    if (!s) return MNEMON_ERR_INVALID_INPUT;
+    if (created) *created = 0;
+
+    typedef struct { uint8_t id[16]; char *name; } ent_t;
+    ent_t *ents = NULL;
+    size_t nent = 0, ecap = 0;
+
+    MDB_txn *txn;
+    if (mnemon_graph_txn_begin(s->graph, MDB_RDONLY, &txn) != MNEMON_OK)
+        return MNEMON_ERR_LMDB;
+
+    /* Collect entities (id + name >= 3 chars). */
+    MDB_dbi dbi;
+    if (mdb_dbi_open(txn, "entities", 0, &dbi) == 0) {
+        MDB_cursor *cur;
+        if (mdb_cursor_open(txn, dbi, &cur) == 0) {
+            MDB_val k, v;
+            int rc = mdb_cursor_get(cur, &k, &v, MDB_FIRST);
+            while (rc == 0) {
+                mnemon_entity_t e = {0};
+                if (mnemon_graph_get_entity(s->graph, txn, k.mv_data, &e)
+                        == MNEMON_OK && e.name && strlen(e.name) >= 3) {
+                    if (nent >= ecap) {
+                        ecap = ecap ? ecap * 2 : 64;
+                        ent_t *p = realloc(ents, ecap * sizeof(ent_t));
+                        if (!p) { mnemon_entity_free(&e); break; }
+                        ents = p;
+                    }
+                    memcpy(ents[nent].id, e.id, 16);
+                    ents[nent].name = strdup(e.name);
+                    nent++;
+                }
+                mnemon_entity_free(&e);
+                rc = mdb_cursor_get(cur, &k, &v, MDB_NEXT);
+            }
+            mdb_cursor_close(cur);
+        }
+    }
+
+    /* Scan memories; record (entity, memory) mention pairs. */
+    typedef struct { size_t ei; uint8_t mid[16]; } pair_t;
+    pair_t *pairs = NULL;
+    size_t np = 0, pcap = 0;
+    if (mdb_dbi_open(txn, "memories", 0, &dbi) == 0) {
+        MDB_cursor *cur;
+        if (mdb_cursor_open(txn, dbi, &cur) == 0) {
+            MDB_val k, v;
+            int rc = mdb_cursor_get(cur, &k, &v, MDB_FIRST);
+            while (rc == 0) {
+                mnemon_memory_t m = {0};
+                if (mnemon_graph_get_memory(s->graph, txn, k.mv_data, &m)
+                        == MNEMON_OK && m.content) {
+                    for (size_t i = 0; i < nent; i++) {
+                        if (content_mentions(m.content, ents[i].name)) {
+                            if (np >= pcap) {
+                                pcap = pcap ? pcap * 2 : 256;
+                                pair_t *p = realloc(pairs, pcap * sizeof(pair_t));
+                                if (!p) break;
+                                pairs = p;
+                            }
+                            pairs[np].ei = i;
+                            memcpy(pairs[np].mid, m.id, 16);
+                            np++;
+                        }
+                    }
+                }
+                mnemon_memory_free(&m);
+                rc = mdb_cursor_get(cur, &k, &v, MDB_NEXT);
+            }
+            mdb_cursor_close(cur);
+        }
+    }
+    mnemon_graph_txn_abort(txn);
+
+    /* Create mentioned_in edges (skip any that already exist). */
+    size_t made = 0;
+    MDB_txn *wtxn;
+    if (mnemon_graph_txn_begin(s->graph, 0, &wtxn) == MNEMON_OK) {
+        int64_t now = mnemon_time_ms();
+        for (size_t p = 0; p < np; p++) {
+            const uint8_t *src = ents[pairs[p].ei].id;
+            if (mnemon_graph_edge_exists(s->graph, wtxn, src, "mentioned_in",
+                                         pairs[p].mid))
+                continue;
+            mnemon_edge_t e = {0};
+            mnemon_uuid_t eu;
+            mnemon_uuid_generate(&eu);
+            memcpy(e.id, eu.bytes, 16);
+            memcpy(e.source_id, src, 16);
+            memcpy(e.target_id, pairs[p].mid, 16);
+            e.edge_type = "mentioned_in";   /* literal: put_edge copies it */
+            e.weight = 1.0f;
+            e.valid_from = now;
+            e.created_at = now;
+            if (mnemon_graph_put_edge(s->graph, wtxn, &e) == MNEMON_OK)
+                made++;
+        }
+        mnemon_graph_txn_commit(wtxn);
+    }
+
+    for (size_t i = 0; i < nent; i++)
+        free(ents[i].name);
+    free(ents);
+    free(pairs);
+
+    if (created) *created = made;
+    mnemon_log(MNEMON_LOG_INFO, "link_entities: created %zu mention edges", made);
+    return MNEMON_OK;
+}
+
+/* Backfill a baseline version snapshot at each existing entity's created_at,
+ * for entities that predate bi-temporal versioning (or were only versioned
+ * recently). Without this, get_state_at_time for a date before the entity's
+ * first recorded snapshot falls back to current state instead of returning a
+ * creation-anchored version. The baseline captures the entity's CURRENT state
+ * (the only data available) dated at created_at -- it anchors the timeline at
+ * true creation rather than reconstructing intermediate history. Idempotent:
+ * an entity that already has a snapshot at/before created_at is skipped.
+ * *count receives the number of baselines written. */
+mnemon_err_t mnemon_backfill_versions(mnemon_storage_t *s, size_t *count)
+{
+    if (!s) return MNEMON_ERR_INVALID_INPUT;
+    if (count) *count = 0;
+
+    /* Collect entity IDs up front (snapshot writes use their own write txns). */
+    uint8_t (*ids)[16] = NULL;
+    size_t n = 0, cap = 0;
+
+    MDB_txn *rtxn;
+    if (mnemon_graph_txn_begin(s->graph, MDB_RDONLY, &rtxn) != MNEMON_OK)
+        return MNEMON_ERR_LMDB;
+    MDB_dbi dbi;
+    if (mdb_dbi_open(rtxn, "entities", 0, &dbi) == 0) {
+        MDB_cursor *cur;
+        if (mdb_cursor_open(rtxn, dbi, &cur) == 0) {
+            MDB_val k, v;
+            int rc = mdb_cursor_get(cur, &k, &v, MDB_FIRST);
+            while (rc == 0) {
+                if (k.mv_size == 16) {
+                    if (n >= cap) {
+                        cap = cap ? cap * 2 : 128;
+                        uint8_t (*p)[16] = realloc(ids, cap * 16);
+                        if (!p) break;
+                        ids = p;
+                    }
+                    memcpy(ids[n++], k.mv_data, 16);
+                }
+                rc = mdb_cursor_get(cur, &k, &v, MDB_NEXT);
+            }
+            mdb_cursor_close(cur);
+        }
+    }
+    mnemon_graph_txn_abort(rtxn);
+
+    size_t made = 0;
+    for (size_t i = 0; i < n; i++) {
+        MDB_txn *wtxn;
+        if (mnemon_graph_txn_begin(s->graph, 0, &wtxn) != MNEMON_OK)
+            continue;
+
+        mnemon_entity_t e = {0};
+        if (mnemon_graph_get_entity(s->graph, wtxn, ids[i], &e) != MNEMON_OK) {
+            mnemon_entity_free(&e);
+            mnemon_graph_txn_abort(wtxn);
+            continue;
+        }
+
+        /* Skip if a snapshot already anchors this entity at/before creation. */
+        mnemon_entity_t *vers = NULL;
+        uint32_t vn = 0;
+        mnemon_graph_load_versions(s->graph, wtxn, ids[i], 0, e.created_at,
+                                   &vers, &vn);
+        bool have_baseline = (vn > 0);
+        for (uint32_t j = 0; j < vn; j++)
+            mnemon_entity_free(&vers[j]);
+        free(vers);
+
+        if (!have_baseline && e.created_at > 0) {
+            /* Write the baseline at created_at (not updated_at) so the index
+             * key lands on the entity's creation time. */
+            mnemon_entity_t baseline = e;
+            baseline.updated_at = e.created_at; /* put_version keys on this */
+            mnemon_uuid_t vu;
+            mnemon_uuid_generate(&vu);
+            if (mnemon_graph_put_version(s->graph, wtxn, vu.bytes, &baseline)
+                    == MNEMON_OK)
+                made++;
+        }
+
+        mnemon_entity_free(&e);
+        mnemon_graph_txn_commit(wtxn);
+    }
+
+    free(ids);
+    if (count) *count = made;
+    mnemon_log(MNEMON_LOG_INFO,
+               "version backfill: wrote %zu creation-time baselines", made);
+    return MNEMON_OK;
+}
+
+/* Lowercase + trim a name into buf for duplicate grouping. */
+static void normalize_name(const char *name, char *buf, size_t buflen)
+{
+    size_t n = 0;
+    const char *p = name;
+    while (*p && isspace((unsigned char)*p)) p++;       /* leading trim */
+    const char *end = p + strlen(p);
+    while (end > p && isspace((unsigned char)end[-1])) end--; /* trailing */
+    for (; p < end && n + 1 < buflen; p++)
+        buf[n++] = (char)tolower((unsigned char)*p);
+    buf[n] = '\0';
+}
+
+/* Re-point every edge touching `dup` so it touches `canonical` instead,
+ * skipping self-loops and edges that already exist. The dup's own edges are
+ * removed afterward by the caller's delete_entity cascade. */
+static void repoint_edges(mnemon_storage_t *s, const uint8_t dup[16],
+                          const uint8_t canonical[16])
+{
+    mnemon_edge_list_t outb = {0}, inb = {0};
+    mnemon_get_edges_from(s, dup, NULL, &outb);
+    mnemon_get_edges_to(s, dup, NULL, &inb);
+
+    MDB_txn *wtxn;
+    if (mnemon_graph_txn_begin(s->graph, 0, &wtxn) == MNEMON_OK) {
+        for (uint32_t i = 0; i < outb.count; i++) {
+            mnemon_edge_t e = outb.edges[i];
+            if (memcmp(e.target_id, canonical, 16) == 0) continue; /* self */
+            if (!e.edge_type) continue;
+            if (mnemon_graph_edge_exists(s->graph, wtxn, canonical,
+                                         e.edge_type, e.target_id)) continue;
+            mnemon_edge_t ne = e;
+            mnemon_uuid_t u; mnemon_uuid_generate(&u);
+            memcpy(ne.id, u.bytes, 16);
+            memcpy(ne.source_id, canonical, 16);
+            mnemon_graph_put_edge(s->graph, wtxn, &ne);
+        }
+        for (uint32_t i = 0; i < inb.count; i++) {
+            mnemon_edge_t e = inb.edges[i];
+            if (memcmp(e.source_id, canonical, 16) == 0) continue; /* self */
+            if (!e.edge_type) continue;
+            if (mnemon_graph_edge_exists(s->graph, wtxn, e.source_id,
+                                         e.edge_type, canonical)) continue;
+            mnemon_edge_t ne = e;
+            mnemon_uuid_t u; mnemon_uuid_generate(&u);
+            memcpy(ne.id, u.bytes, 16);
+            memcpy(ne.target_id, canonical, 16);
+            mnemon_graph_put_edge(s->graph, wtxn, &ne);
+        }
+        mnemon_graph_txn_commit(wtxn);
+    }
+    mnemon_edge_list_free(&outb);
+    mnemon_edge_list_free(&inb);
+}
+
+/* Merge entities that share a normalized name and entity_type into one
+ * canonical entity (the one with the most observations). Duplicate
+ * observations are appended (deduped), edges are re-pointed to the canonical,
+ * and duplicates are deleted. *merged receives the number removed. */
+mnemon_err_t mnemon_resolve_entities(mnemon_storage_t *s, size_t *merged)
+{
+    if (!s) return MNEMON_ERR_INVALID_INPUT;
+    if (merged) *merged = 0;
+
+    typedef struct { uint8_t id[16]; char *norm; char *type;
+                     uint32_t obs; } row_t;
+    row_t *rows = NULL;
+    size_t n = 0, cap = 0;
+
+    MDB_txn *txn;
+    if (mnemon_graph_txn_begin(s->graph, MDB_RDONLY, &txn) != MNEMON_OK)
+        return MNEMON_ERR_LMDB;
+    MDB_dbi dbi;
+    if (mdb_dbi_open(txn, "entities", 0, &dbi) == 0) {
+        MDB_cursor *cur;
+        if (mdb_cursor_open(txn, dbi, &cur) == 0) {
+            MDB_val k, v;
+            int rc = mdb_cursor_get(cur, &k, &v, MDB_FIRST);
+            while (rc == 0) {
+                mnemon_entity_t e = {0};
+                if (mnemon_graph_get_entity(s->graph, txn, k.mv_data, &e)
+                        == MNEMON_OK && e.name && e.name[0]) {
+                    if (n >= cap) {
+                        cap = cap ? cap * 2 : 64;
+                        row_t *p = realloc(rows, cap * sizeof(row_t));
+                        if (!p) { mnemon_entity_free(&e); break; }
+                        rows = p;
+                    }
+                    char nb[256];
+                    normalize_name(e.name, nb, sizeof(nb));
+                    memcpy(rows[n].id, e.id, 16);
+                    rows[n].norm = strdup(nb);
+                    rows[n].type = strdup(e.entity_type ? e.entity_type : "");
+                    rows[n].obs  = e.observation_count;
+                    n++;
+                }
+                mnemon_entity_free(&e);
+                rc = mdb_cursor_get(cur, &k, &v, MDB_NEXT);
+            }
+            mdb_cursor_close(cur);
+        }
+    }
+    mnemon_graph_txn_abort(txn);
+
+    size_t removed = 0;
+    char consumed_pad = 0; (void)consumed_pad;
+    bool *consumed = calloc(n ? n : 1, sizeof(bool));
+    if (!consumed) { for (size_t i=0;i<n;i++){free(rows[i].norm);free(rows[i].type);} free(rows); return MNEMON_ERR_OOM; }
+
+    for (size_t i = 0; i < n; i++) {
+        if (consumed[i]) continue;
+        /* Canonical for this group = member with most observations. */
+        size_t canon = i;
+        for (size_t j = i + 1; j < n; j++) {
+            if (consumed[j]) continue;
+            if (strcmp(rows[i].norm, rows[j].norm) == 0 &&
+                strcmp(rows[i].type, rows[j].type) == 0 &&
+                rows[j].obs > rows[canon].obs)
+                canon = j;
+        }
+        for (size_t j = i; j < n; j++) {
+            if (j == canon || consumed[j]) continue;
+            if (strcmp(rows[i].norm, rows[j].norm) != 0 ||
+                strcmp(rows[i].type, rows[j].type) != 0)
+                continue;
+
+            /* Merge rows[j] (dup) into rows[canon]. */
+            mnemon_entity_t c = {0}, d = {0};
+            if (mnemon_get_entity(s, rows[canon].id, &c) == MNEMON_OK &&
+                mnemon_get_entity(s, rows[j].id, &d) == MNEMON_OK) {
+                /* Append dup observations not already present. */
+                for (uint32_t oi = 0; oi < d.observation_count; oi++) {
+                    bool dupobs = false;
+                    for (uint32_t ci = 0; ci < c.observation_count; ci++)
+                        if (c.observations[ci] && d.observations[oi] &&
+                            strcmp(c.observations[ci], d.observations[oi]) == 0)
+                            { dupobs = true; break; }
+                    if (dupobs) continue;
+                    char **no = realloc(c.observations,
+                        (c.observation_count + 1) * sizeof(char *));
+                    if (!no) break;
+                    c.observations = no;
+                    c.observations[c.observation_count++] =
+                        strdup(d.observations[oi]);
+                }
+                c.updated_at = mnemon_time_ms();
+
+                repoint_edges(s, rows[j].id, rows[canon].id);
+                mnemon_delete_entity(s, rows[j].id);   /* cascades dup edges */
+                mnemon_store_entity(s, &c);            /* new version + index */
+                removed++;
+                consumed[j] = true;
+            }
+            mnemon_entity_free(&c);
+            mnemon_entity_free(&d);
+        }
+        consumed[i] = true;
+    }
+
+    for (size_t i = 0; i < n; i++) { free(rows[i].norm); free(rows[i].type); }
+    free(rows);
+    free(consumed);
+    if (merged) *merged = removed;
+    mnemon_log(MNEMON_LOG_INFO, "resolve_entities: merged %zu duplicates", removed);
+    return MNEMON_OK;
 }
 
 mnemon_err_t mnemon_delete_entity(mnemon_storage_t *s, const uint8_t id[16])

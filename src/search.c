@@ -240,10 +240,11 @@ static mnemon_err_t build_results(mnemon_storage_t *s,
                                   int top_k, float min_score,
                                   mnemon_result_set_t *out)
 {
-    int n = count < top_k ? count : top_k;
+    int target = (top_k > 0 && top_k < count) ? top_k : count;
     int actual = 0;
 
-    out->results = calloc((size_t)n, sizeof(mnemon_result_t));
+    out->results = calloc((size_t)(target > 0 ? target : 1),
+                          sizeof(mnemon_result_t));
     if (!out->results)
         return MNEMON_ERR_OOM;
 
@@ -252,33 +253,36 @@ static mnemon_err_t build_results(mnemon_storage_t *s,
     MDB_txn *txn = NULL;
     mnemon_graph_txn_begin(graph, MDB_RDONLY, &txn);
 
-    for (int i = 0; i < n; i++) {
+    for (int i = 0; i < count && actual < target; i++) {
         if (table[i].rrf_score < min_score)
             break;
+
+        /* The graph ranker adds edge targets, which for entity->entity
+         * relations are entity (not memory) IDs. Skip any fusion node that
+         * does not resolve to a real memory rather than emitting a ghost
+         * result with empty content and tier "unknown". */
+        mnemon_memory_t mem;
+        memset(&mem, 0, sizeof(mem));
+        mnemon_err_t err = MNEMON_ERR_NOT_FOUND;
+        if (txn)
+            err = mnemon_graph_get_memory(graph, txn, table[i].id, &mem);
+        if (err != MNEMON_OK || !mem.content) {
+            mnemon_memory_free(&mem);
+            continue;
+        }
 
         mnemon_result_t *r = &out->results[actual];
         mnemon_uuid_t uuid;
         memcpy(uuid.bytes, table[i].id, 16);
         mnemon_uuid_to_string(&uuid, r->id, sizeof(r->id));
 
-        /* Fetch content from LMDB within the shared transaction */
-        mnemon_memory_t mem;
-        memset(&mem, 0, sizeof(mem));
-        mnemon_err_t err = MNEMON_ERR_NOT_FOUND;
-        if (txn)
-            err = mnemon_graph_get_memory(graph, txn, table[i].id, &mem);
-        if (err == MNEMON_OK && mem.content) {
-            r->content = strdup(mem.content);
-            switch (mem.tier) {
-            case MNEMON_TIER_EPISODIC:   r->tier = strdup("episodic"); break;
-            case MNEMON_TIER_SEMANTIC:   r->tier = strdup("semantic"); break;
-            case MNEMON_TIER_PROCEDURAL: r->tier = strdup("procedural"); break;
-            }
-            mnemon_memory_free(&mem);
-        } else {
-            r->content = strdup("");
-            r->tier = strdup("unknown");
+        r->content = strdup(mem.content);
+        switch (mem.tier) {
+        case MNEMON_TIER_EPISODIC:   r->tier = strdup("episodic"); break;
+        case MNEMON_TIER_SEMANTIC:   r->tier = strdup("semantic"); break;
+        case MNEMON_TIER_PROCEDURAL: r->tier = strdup("procedural"); break;
         }
+        mnemon_memory_free(&mem);
 
         r->score = table[i].rrf_score;
         r->graph_score = table[i].graph_score;
@@ -290,7 +294,7 @@ static mnemon_err_t build_results(mnemon_storage_t *s,
     if (txn) mnemon_graph_txn_abort(txn);
 
     out->count = actual;
-    out->truncated = (count > top_k);
+    out->truncated = (count > target);
 
     return MNEMON_OK;
 }

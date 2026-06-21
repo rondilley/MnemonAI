@@ -36,6 +36,7 @@ struct mnemon_graph {
     MDB_dbi  dbi_memories;
     MDB_dbi  dbi_chunks;
     MDB_dbi  dbi_temporal;
+    MDB_dbi  dbi_versions;
     MDB_dbi  dbi_intents;
     MDB_dbi  dbi_meta;
 };
@@ -469,7 +470,7 @@ mnemon_err_t mnemon_graph_open(mnemon_graph_t **out, const char *path,
     rc = mdb_env_create(&g->env);
     if (rc) goto fail_lmdb;
 
-    mdb_env_set_maxdbs(g->env, 8);
+    mdb_env_set_maxdbs(g->env, 16);
     mdb_env_set_mapsize(g->env, (size_t)map_size_gb * 1073741824ULL);
     mdb_env_set_maxreaders(g->env, max_readers);
 
@@ -486,6 +487,7 @@ mnemon_err_t mnemon_graph_open(mnemon_graph_t **out, const char *path,
     mdb_dbi_open(txn, "memories", MDB_CREATE, &g->dbi_memories);
     mdb_dbi_open(txn, "chunks", MDB_CREATE, &g->dbi_chunks);
     mdb_dbi_open(txn, "temporal", MDB_CREATE | MDB_DUPSORT, &g->dbi_temporal);
+    mdb_dbi_open(txn, "versions", MDB_CREATE, &g->dbi_versions);
     mdb_dbi_open(txn, "intents", MDB_CREATE, &g->dbi_intents);
     mdb_dbi_open(txn, "meta", MDB_CREATE, &g->dbi_meta);
 
@@ -790,6 +792,185 @@ mnemon_err_t mnemon_graph_get_entity(mnemon_graph_t *g, MDB_txn *txn, const uint
     return MNEMON_OK;
 }
 
+/* Big-endian int64 codec so LMDB lexicographic key order matches numeric order
+ * of the (always-positive) millisecond timestamps used for valid_from. */
+static void put_be64(uint8_t out[8], int64_t v)
+{
+    uint64_t u = (uint64_t)v;
+    for (int i = 7; i >= 0; i--) { out[i] = (uint8_t)(u & 0xff); u >>= 8; }
+}
+static int64_t get_be64(const uint8_t in[8])
+{
+    uint64_t u = 0;
+    for (int i = 0; i < 8; i++) u = (u << 8) | in[i];
+    return (int64_t)u;
+}
+
+mnemon_err_t mnemon_graph_put_version(mnemon_graph_t *g, MDB_txn *txn,
+                                      const uint8_t version_id[16],
+                                      const mnemon_entity_t *e)
+{
+    if (!g || !txn || !version_id || !e) return MNEMON_ERR_INVALID_INPUT;
+
+    /* Immutable snapshot keyed by its own version_id. */
+    mpk_t m; mpk_init(&m);
+    pack_entity(&m, e);
+    MDB_val vk = {16, CONST_CAST(version_id)};
+    MDB_val vv = {m.len, m.buf};
+    int rc = mdb_put(txn, g->dbi_versions, &vk, &vv, 0);
+    mpk_free(&m);
+    if (rc) { mnemon_err_set(MNEMON_ERR_LMDB, rc, "%s", mdb_strerror(rc));
+              return MNEMON_ERR_LMDB; }
+
+    /* Temporal index: entity_id | valid_from(BE) -> version_id.
+     *
+     * valid_from must be UNIQUE per entity so the index orders snapshots
+     * unambiguously and "newest <= T" point-in-time queries are deterministic.
+     * updated_at is only millisecond-granular, so two mutations in the same
+     * millisecond would collide on the exact key; under MDB_DUPSORT that stores
+     * both version_ids at one key, ordered by the (random, non-monotonic)
+     * UUIDv7 bytes -- making the wrong version look newest. Resolve only a real
+     * collision: advance valid_from until the exact (entity_id|valid_from) key
+     * is free. This intentionally does NOT bump merely because a later snapshot
+     * exists, so a historical backfill at an earlier created_at keeps its date. */
+    int64_t vf = e->updated_at;
+    uint8_t tkey[24];
+    memcpy(tkey, e->id, 16);
+    for (;;) {
+        put_be64(tkey + 16, vf);
+        MDB_val probe = {24, tkey}, pv;
+        if (mdb_get(txn, g->dbi_temporal, &probe, &pv) == MDB_NOTFOUND)
+            break;             /* key free -> use this valid_from */
+        vf++;                  /* collision -> try the next millisecond */
+    }
+
+    MDB_val tk = {24, tkey};
+    MDB_val tv = {16, CONST_CAST(version_id)};
+    rc = mdb_put(txn, g->dbi_temporal, &tk, &tv, 0);
+    if (rc) { mnemon_err_set(MNEMON_ERR_LMDB, rc, "%s", mdb_strerror(rc));
+              return MNEMON_ERR_LMDB; }
+    return MNEMON_OK;
+}
+
+/* Remove temporal-index entries whose index valid_from differs from the
+ * referenced snapshot's own updated_at by more than tol_ms. The only writer
+ * (put_version) keys valid_from == updated_at, advancing by +1ms only on an
+ * exact same-millisecond collision -- so a gap larger than a few ms can only be
+ * a mis-keyed backfill artifact (an earlier bug bumped a created_at baseline to
+ * after a later snapshot). Deletes both the temporal entry and the orphaned
+ * version snapshot. *pruned receives the count removed. */
+mnemon_err_t mnemon_graph_prune_miskeyed_versions(mnemon_graph_t *g,
+                                                  MDB_txn *txn,
+                                                  int64_t tol_ms,
+                                                  size_t *pruned)
+{
+    if (!g || !txn) return MNEMON_ERR_INVALID_INPUT;
+    if (pruned) *pruned = 0;
+
+    MDB_cursor *cur;
+    if (mdb_cursor_open(txn, g->dbi_temporal, &cur)) return MNEMON_ERR_LMDB;
+
+    /* Collect (temporal_key, version_id) targets first; deleting during cursor
+     * iteration is unsafe. */
+    struct { uint8_t tkey[24]; uint8_t vid[16]; } *targets = NULL;
+    size_t n = 0, cap = 0;
+
+    MDB_val key, val;
+    int rc = mdb_cursor_get(cur, &key, &val, MDB_FIRST);
+    while (rc == 0) {
+        if (key.mv_size == 24 && val.mv_size == 16) {
+            int64_t vf = get_be64((const uint8_t *)key.mv_data + 16);
+            MDB_val vk = {16, val.mv_data}, vv;
+            if (mdb_get(txn, g->dbi_versions, &vk, &vv) == 0) {
+                mnemon_entity_t snap = {0};
+                mpr_t r = {vv.mv_data, vv.mv_size, 0};
+                unpack_entity(&r, &snap);
+                int64_t diff = vf - snap.updated_at;
+                if (diff < 0) diff = -diff;
+                if (diff > tol_ms) {
+                    if (n >= cap) {
+                        cap = cap ? cap * 2 : 16;
+                        void *p = realloc(targets, cap * sizeof(*targets));
+                        if (p) targets = p;
+                    }
+                    if (n < cap) {
+                        memcpy(targets[n].tkey, key.mv_data, 24);
+                        memcpy(targets[n].vid, val.mv_data, 16);
+                        n++;
+                    }
+                }
+                mnemon_entity_free(&snap);
+            }
+        }
+        rc = mdb_cursor_get(cur, &key, &val, MDB_NEXT);
+    }
+    mdb_cursor_close(cur);
+
+    for (size_t i = 0; i < n; i++) {
+        MDB_val tk = {24, targets[i].tkey};
+        MDB_val tv = {16, targets[i].vid};
+        mdb_del(txn, g->dbi_temporal, &tk, &tv);   /* DUPSORT: key+value pair */
+        MDB_val vk = {16, targets[i].vid};
+        mdb_del(txn, g->dbi_versions, &vk, NULL);
+    }
+    free(targets);
+    if (pruned) *pruned = n;
+    return MNEMON_OK;
+}
+
+/* Load an entity's version snapshots whose valid_from falls in [since,until]
+ * (0 = unbounded), ordered ascending by valid_from. Caller frees each entity
+ * and the array. */
+mnemon_err_t mnemon_graph_load_versions(mnemon_graph_t *g, MDB_txn *txn,
+                                        const uint8_t entity_id[16],
+                                        int64_t since, int64_t until,
+                                        mnemon_entity_t **out, uint32_t *count)
+{
+    if (!g || !txn || !entity_id || !out || !count)
+        return MNEMON_ERR_INVALID_INPUT;
+    *out = NULL; *count = 0;
+
+    MDB_cursor *cur;
+    if (mdb_cursor_open(txn, g->dbi_temporal, &cur)) return MNEMON_ERR_LMDB;
+
+    size_t cap = 8; uint32_t n = 0;
+    mnemon_entity_t *arr = calloc(cap, sizeof(mnemon_entity_t));
+    if (!arr) { mdb_cursor_close(cur); return MNEMON_ERR_OOM; }
+
+    uint8_t prefix[24];
+    memcpy(prefix, entity_id, 16);
+    memset(prefix + 16, 0, 8);
+    MDB_val key = {24, prefix}, val;
+    int rc = mdb_cursor_get(cur, &key, &val, MDB_SET_RANGE);
+    while (rc == 0) {
+        if (key.mv_size != 24 ||
+            memcmp(key.mv_data, entity_id, 16) != 0)
+            break;
+        int64_t vf = get_be64((const uint8_t *)key.mv_data + 16);
+        bool in_range = !((since > 0 && vf < since) ||
+                          (until > 0 && vf > until));
+        if (in_range && val.mv_size == 16) {
+            MDB_val vk = {16, val.mv_data}, vv;
+            if (mdb_get(txn, g->dbi_versions, &vk, &vv) == 0) {
+                if (n >= cap) {
+                    cap *= 2;
+                    mnemon_entity_t *p = realloc(arr, cap * sizeof(*p));
+                    if (!p) break;
+                    arr = p;
+                }
+                memset(&arr[n], 0, sizeof(arr[n]));
+                mpr_t r = {vv.mv_data, vv.mv_size, 0};
+                unpack_entity(&r, &arr[n]);
+                n++;
+            }
+        }
+        rc = mdb_cursor_get(cur, &key, &val, MDB_NEXT);
+    }
+    mdb_cursor_close(cur);
+    *out = arr; *count = n;
+    return MNEMON_OK;
+}
+
 mnemon_err_t mnemon_graph_del_entity(mnemon_graph_t *g, MDB_txn *txn, const uint8_t id[16])
 {
     MDB_val key = {16, CONST_CAST(id)};
@@ -809,6 +990,17 @@ static void build_edge_key(uint8_t out[40], const uint8_t a[16], const char *typ
     out[20]=(uint8_t)(h>>24); out[21]=(uint8_t)(h>>16);
     out[22]=(uint8_t)(h>>8);  out[23]=(uint8_t)h;
     memcpy(out+24, b, 16);
+}
+
+bool mnemon_graph_edge_exists(mnemon_graph_t *g, MDB_txn *txn,
+                              const uint8_t source[16], const char *type,
+                              const uint8_t target[16])
+{
+    if (!g || !txn || !source || !type || !target) return false;
+    uint8_t fwd[40];
+    build_edge_key(fwd, source, type, target);
+    MDB_val k = {40, fwd}, v;
+    return mdb_get(txn, g->dbi_edges, &k, &v) == 0;
 }
 
 mnemon_err_t mnemon_graph_put_edge(mnemon_graph_t *g, MDB_txn *txn, const mnemon_edge_t *e)
@@ -905,8 +1097,6 @@ mnemon_err_t mnemon_graph_get_edges_to(mnemon_graph_t *g, MDB_txn *txn,
         if (key.mv_size != 40 || memcmp(key.mv_data, target_id, 16) != 0)
             break;
 
-        /* val contains the edge_id; look up the full edge from forward index */
-        /* For Phase 1, return a partial edge with source/target IDs from the key */
         if (out->count >= cap) {
             cap *= 2;
             mnemon_edge_t *p = realloc(out->edges, cap * sizeof(mnemon_edge_t));
@@ -915,10 +1105,25 @@ mnemon_err_t mnemon_graph_get_edges_to(mnemon_graph_t *g, MDB_txn *txn,
         }
         mnemon_edge_t *e = &out->edges[out->count];
         memset(e, 0, sizeof(*e));
-        if (val.mv_size == 16) memcpy(e->id, val.mv_data, 16);
-        memcpy(e->target_id, target_id, 16);
-        /* source_id is at key bytes 24-39 */
-        if (key.mv_size == 40) memcpy(e->source_id, (uint8_t*)key.mv_data + 24, 16);
+
+        /* Reverse key = target | type_hash | source. Reconstruct the forward
+         * key (source | type_hash | target) and look up the full edge so the
+         * caller gets edge_type/weight/temporal fields, not just the IDs. */
+        const uint8_t *rk = key.mv_data;
+        uint8_t fwd[40];
+        memcpy(fwd,      rk + 24, 16); /* source */
+        memcpy(fwd + 16, rk + 16, 8);  /* type hash */
+        memcpy(fwd + 24, target_id, 16);
+        MDB_val fk = {40, fwd}, fv;
+        if (mdb_get(txn, g->dbi_edges, &fk, &fv) == 0) {
+            mpr_t r = {fv.mv_data, fv.mv_size, 0};
+            unpack_edge(&r, e);
+        } else {
+            /* Fall back to IDs from the key if the forward edge is missing. */
+            if (val.mv_size == 16) memcpy(e->id, val.mv_data, 16);
+            memcpy(e->target_id, target_id, 16);
+            memcpy(e->source_id, rk + 24, 16);
+        }
         out->count++;
 
         rc = mdb_cursor_get(cur, &key, &val, MDB_NEXT);
@@ -1035,7 +1240,17 @@ mnemon_err_t mnemon_graph_bfs(mnemon_graph_t *g, MDB_txn *txn,
 
         mnemon_entity_t ent;
         memset(&ent, 0, sizeof(ent));
-        mnemon_graph_get_entity(g, txn, current, &ent);
+        mnemon_err_t ge = mnemon_graph_get_entity(g, txn, current, &ent);
+
+        /* Edge targets are not necessarily entities -- e.g. mentioned_in edges
+         * point at memories. Such ids do not resolve as entities; skip them so
+         * the traversal never emits zeroed "null" nodes and never tries to walk
+         * outbound edges from a non-entity. The starting node is always an
+         * entity, and edge targets remain visible via the caller's edge list. */
+        if (ge != MNEMON_OK) {
+            mnemon_entity_free(&ent);
+            continue;
+        }
 
         if (visit) {
             int rc = visit(&ent, NULL, depth, user_ctx);

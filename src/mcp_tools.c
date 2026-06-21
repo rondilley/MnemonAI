@@ -587,6 +587,30 @@ static cJSON *tool_health_check(mnemon_storage_t *s, const cJSON *params)
     return result;
 }
 
+static cJSON *tool_link_entities(mnemon_storage_t *s, const cJSON *params)
+{
+    (void)params;
+    size_t created = 0;
+    mnemon_err_t err = mnemon_link_entities(s, &created);
+    cJSON *result = cJSON_CreateObject();
+    if (err != MNEMON_OK)
+        cJSON_AddStringToObject(result, "error", mnemon_strerror(err));
+    cJSON_AddNumberToObject(result, "edges_created", (double)created);
+    return result;
+}
+
+static cJSON *tool_resolve_entities(mnemon_storage_t *s, const cJSON *params)
+{
+    (void)params;
+    size_t merged = 0;
+    mnemon_err_t err = mnemon_resolve_entities(s, &merged);
+    cJSON *result = cJSON_CreateObject();
+    if (err != MNEMON_OK)
+        cJSON_AddStringToObject(result, "error", mnemon_strerror(err));
+    cJSON_AddNumberToObject(result, "merged", (double)merged);
+    return result;
+}
+
 static cJSON *tool_consolidate(mnemon_storage_t *s, const cJSON *params)
 {
     const char *topic = json_str(params, "topic", NULL);
@@ -1277,6 +1301,8 @@ static cJSON *tool_get_history(mnemon_storage_t *s, const cJSON *params)
         cJSON_AddStringToObject(v, "created_at", ts);
         mnemon_format_iso8601(vl.versions[i].updated_at, ts, sizeof(ts));
         cJSON_AddStringToObject(v, "updated_at", ts);
+        cJSON_AddNumberToObject(v, "observation_count",
+                                vl.versions[i].observation_count);
         cJSON_AddItemToArray(versions, v);
     }
     cJSON_AddItemToObject(result, "versions", versions);
@@ -1826,6 +1852,14 @@ static const mnemon_tool_def_t tool_defs[] = {
 
     {"health_check", tool_health_check,
      "Check daemon health and component status",
+     SCHEMA("{\"type\":\"object\",\"properties\":{}}")},
+
+    {"link_entities", tool_link_entities,
+     "Connect entities to the memories that mention them by name (mentioned_in edges). Idempotent; safe to re-run.",
+     SCHEMA("{\"type\":\"object\",\"properties\":{}}")},
+
+    {"resolve_entities", tool_resolve_entities,
+     "Merge duplicate entities sharing a name and type into one canonical entity (observations merged, edges re-pointed). Idempotent; safe to re-run.",
      SCHEMA("{\"type\":\"object\",\"properties\":{}}")},
 
     {"consolidate_memories", tool_consolidate,

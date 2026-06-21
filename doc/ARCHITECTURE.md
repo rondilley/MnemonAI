@@ -574,15 +574,17 @@ All entities, edges, and memories use **UUIDv7** (RFC 9562):
 
 ### 5.2 LMDB Database Layout
 
-LMDB supports named databases (sub-databases) within a single environment file. We use seven:
+LMDB supports named databases (sub-databases) within a single environment file. We use nine (`mdb_env_set_maxdbs` is 16 to leave headroom):
 
 | Database | Key Format | Key Size | Value | Flags | Purpose |
 |---|---|---|---|---|---|
-| `entities` | `entity_id` | 16 bytes | msgpack entity | 0 | Entity storage |
+| `entities` | `entity_id` | 16 bytes | msgpack entity | 0 | Entity storage (current version) |
 | `edges` | `source_id \| type_hash \| target_id` | 40 bytes | msgpack edge | `MDB_DUPSORT` | Forward edge index |
 | `edges_rev` | `target_id \| type_hash \| source_id` | 40 bytes | `edge_id` (16 bytes) | `MDB_DUPSORT` | Reverse edge index |
 | `memories` | `memory_id` | 16 bytes | msgpack memory | 0 | Raw memory storage |
-| `temporal` | `entity_id \| valid_from` | 24 bytes | `version_id` (16 bytes) | `MDB_DUPSORT` | Temporal version index |
+| `chunks` | `chunk_id` | 16 bytes | parent_id + offset/length | 0 | Chunk metadata (parent_memory_id, byte offset/length) |
+| `temporal` | `entity_id \| valid_from(BE)` | 24 bytes | `version_id` (16 bytes) | `MDB_DUPSORT` | Entity version index (valid_from big-endian so key order == chronological) |
+| `versions` | `version_id` | 16 bytes | msgpack entity snapshot | 0 | Immutable entity version snapshots |
 | `intents` | `intent_id` | 16 bytes | msgpack intent | 0 | Write-ahead intent log |
 | `meta` | string key | variable | string value | 0 | Schema version, counters |
 
@@ -771,7 +773,7 @@ Both use the same dimensions (768), metric (cosine), and ID mapping scheme. The 
 
 Tools are registered in `mcp_dispatch.c` with their JSON Schema input definitions. The `tools/list` MCP method returns the full registry.
 
-### 6.3 Tool Definitions (35 tools)
+### 6.3 Tool Definitions (38 tools)
 
 #### 6.3.1 Memory CRUD (4 tools)
 
@@ -1803,12 +1805,13 @@ These were open during the initial draft. All resolved as of 2026-04-03.
 | test_fts | 11 | Index, search, remove, update memory, update entity, sanitization, checkpoint, clear, empty/special query |
 | test_vector | 7 | Add/remove/search, entity isolation, save/load persistence, empty search, rwlock |
 | test_search | 6 | Keyword, hybrid RRF, no results, top_k cap, empty query, UUID validity |
-| test_mcp | 42 | All 35 tools + MCP lifecycle + tools/list schema + 3 error codes + isError + secret rejection + content size cap |
+| test_mcp | 42 | All 38 tools + MCP lifecycle + tools/list schema + 3 error codes + isError + secret rejection + content size cap |
 | test_temporal | 24 | ISO 8601, decay math, UUID ops, importance update, prune, admit control, audit log, model manager |
 | test_secret | 33 | All 7 pattern types, false positives, edge cases, entropy |
 | test_storage | 24 | Full-field round-trip, 10KB content, unicode, tags, bulk 50, delete+FTS, delete entity, edges_to, rebuild indexes, replay intents, storage accessors |
-| test_mcp_client.py | 105 | All 35 tools end-to-end over stdio, MCP spec conformance, schema validation |
-| test_mcp_http.py | 42 | All 35 tools over HTTP, auth, sessions, CORS |
+| test_mcp_client.py | 105 | All 38 tools end-to-end over stdio, MCP spec conformance, schema validation |
+| test_mcp_http.py | 49 | All 38 tools over HTTP, auth, sessions, CORS, coverage assertion (model_path=none) |
+| test_all_tools_http.py | 40 | All 38 tools over HTTP with the real embedding model (ctest: mcp_http_embeddings; skips if model absent) |
 | test_mcp_perf.py | -- | DEPRECATED: valgrind-wrapped, no embedding, <=1K scale |
 | test_perf_native.py | -- | Native perf harness: scale + concurrency sweeps, RSS sampling, realistic mix |
 | **Total** | **343** | |

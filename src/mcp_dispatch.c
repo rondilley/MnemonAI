@@ -19,7 +19,10 @@
 #include "mcp_tools.h"
 #include "log.h"
 
-#define MAX_TOOLS 36
+/* Upper bound on registered tools. Must be >= the number of entries in
+ * tool_defs[] (mcp_tools.c); excess registrations are silently dropped from
+ * tools/list and dispatch. Keep headroom so adding tools doesn't truncate. */
+#define MAX_TOOLS 64
 
 typedef struct {
     const char           *name;
@@ -183,6 +186,11 @@ mnemon_err_t mnemon_dispatch_init(mnemon_dispatch_t **out,
 
     /* Register tools from mcp_tools.c */
     count = mnemon_get_tool_defs(&defs);
+    if (count > MAX_TOOLS)
+        mnemon_log(MNEMON_LOG_WARNING,
+                   "tool registry has %d tools but MAX_TOOLS is %d -- %d tool(s) "
+                   "will be DROPPED; raise MAX_TOOLS in mcp_dispatch.c",
+                   count, MAX_TOOLS, count - MAX_TOOLS);
     for (int i = 0; i < count && i < MAX_TOOLS; i++) {
         d->tools[i].name = defs[i].name;
         d->tools[i].handler = defs[i].handler;

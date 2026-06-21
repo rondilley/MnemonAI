@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-MCP HTTP Transport Test -- Tests all 35 tools over Streamable HTTP.
+MCP HTTP Transport Test -- Tests all 38 tools over Streamable HTTP.
 
 Starts mnemond in foreground mode with HTTP enabled, then exercises
 every tool via HTTP POST to /mcp, validating MCP spec compliance.
@@ -188,9 +188,10 @@ def main():
             "jsonrpc": "2.0", "id": 2, "method": "tools/list"
         })
         tools = resp.get("result", {}).get("tools", []) if resp else []
-        test("[HTTP] tools/list returns 35+ tools", len(tools) >= 28, f"got {len(tools)}")
+        tool_names = {t.get("name") for t in tools}
+        test("[HTTP] tools/list returns all 38 tools", len(tools) == 38, f"got {len(tools)}")
 
-        # ---- All 35 tools ----
+        # ---- All 38 tools ----
         print("\n  --- Tools over HTTP ---")
 
         # store_memory
@@ -270,6 +271,22 @@ def main():
         r, ie = call_tool(port, "get_changes_since", {"since": "2020-01-01T00:00:00Z"}, 32)
         test("[HTTP] get_changes_since", isinstance(r.get("results"), list))
 
+        # extract_events (ISO + natural-language dates)
+        r, ie = call_tool(port, "extract_events", {
+            "content": "Launch on 2026-06-10. Beta on January 15, 2026."
+        }, 33)
+        test("[HTTP] extract_events", r.get("extracted") == 2 and not ie)
+
+        # search_events
+        r, ie = call_tool(port, "search_events", {
+            "since": "2026-01-01", "until": "2026-12-31", "top_k": 10
+        }, 34)
+        test("[HTTP] search_events", isinstance(r.get("results"), list) and len(r.get("results", [])) >= 1)
+
+        # calculate_duration
+        r, ie = call_tool(port, "calculate_duration", {"from": "2026-01-01", "to": "2026-01-31"}, 35)
+        test("[HTTP] calculate_duration", r.get("days") == 30 and not ie)
+
         # health_check
         r, ie = call_tool(port, "health_check", {}, 40)
         test("[HTTP] health_check", r.get("status") == "ok")
@@ -293,6 +310,14 @@ def main():
         # consolidate_memories
         r, ie = call_tool(port, "consolidate_memories", {"dry_run": True}, 50)
         test("[HTTP] consolidate_memories", "consolidated_count" in r)
+
+        # link_entities (connect entities to memories that mention them)
+        r, ie = call_tool(port, "link_entities", {}, 57)
+        test("[HTTP] link_entities", "edges_created" in r and not ie)
+
+        # resolve_entities (merge duplicate entities)
+        r, ie = call_tool(port, "resolve_entities", {}, 58)
+        test("[HTTP] resolve_entities", "merged" in r and not ie)
 
         # prune_stale
         r, ie = call_tool(port, "prune_stale", {"dry_run": True, "min_importance": 99}, 51)
@@ -327,6 +352,12 @@ def main():
         r, ie = call_tool(port, "delete_memory", {"id": stored_id}, 60)
         test("[HTTP] delete_memory", r.get("deleted") == True)
 
+        # delete_entity (create a dedicated entity, then delete it)
+        r, _ = call_tool(port, "create_entity", {"name": "DeleteMe", "entity_type": "test"}, 61)
+        del_ent = r.get("id", "")
+        r, ie = call_tool(port, "delete_entity", {"id": del_ent}, 62)
+        test("[HTTP] delete_entity", r.get("deleted") == True)
+
         # ---- Honeypot: Decoy Tools ----
         print("\n  --- Honeypot Decoy Tools ---")
 
@@ -345,6 +376,23 @@ def main():
         r, ie = call_tool(port, "set_system_config",
                           {"key": "auth_token", "value": "hacked"}, 73)
         test("[DECOY] set_system_config returns error", "error" in r)
+
+        # ---- Coverage: every advertised tool is exercised above ----
+        print("\n  --- Coverage ---")
+        exercised = {
+            "store_memory", "retrieve_memory", "update_memory", "delete_memory",
+            "list_memories", "search_hybrid", "search_semantic", "search_keyword",
+            "search_temporal", "create_entity", "add_observation", "create_relation",
+            "search_entities", "get_entity_graph", "delete_entity", "get_history",
+            "get_state_at_time", "get_changes_since", "extract_events", "search_events",
+            "calculate_duration", "health_check", "get_memory_stats", "get_hardware_info",
+            "get_index_stats", "consolidate_memories", "prune_stale", "link_entities",
+            "resolve_entities", "import_batch", "import_file", "import_directory",
+            "get_import_status", "rebuild_indexes", "admin_reset_auth",
+            "export_all_memories", "debug_raw_query", "set_system_config",
+        }
+        missing = tool_names - exercised
+        test("[HTTP] every advertised tool is covered", not missing, f"uncovered={sorted(missing)}")
 
         # ---- Error handling ----
         print("\n  --- Error Handling ---")

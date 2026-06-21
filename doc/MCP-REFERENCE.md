@@ -116,13 +116,13 @@ mnemond --stdio --config /path/to/config.conf
 
 ```
 -> {"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"my-client","version":"1.0"}}}
-<- {"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2024-11-05","capabilities":{"tools":{}},"serverInfo":{"name":"mnemond","version":"0.7.0"}}}
+<- {"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2024-11-05","capabilities":{"tools":{}},"serverInfo":{"name":"mnemond","version":"0.8.2"}}}
 -> {"jsonrpc":"2.0","method":"notifications/initialized"}
    (no response -- this is a notification)
 -> {"jsonrpc":"2.0","id":2,"method":"tools/list"}
 <- {"jsonrpc":"2.0","id":2,"result":{"tools":[...]}}
 -> {"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"health_check","arguments":{}}}
-<- {"jsonrpc":"2.0","id":3,"result":{"content":[{"type":"text","text":"{\"status\":\"ok\",\"version\":\"v0.7.0\",\"storage_ok\":true,\"embedding_model_loaded\":true}"}],"isError":false}}
+<- {"jsonrpc":"2.0","id":3,"result":{"content":[{"type":"text","text":"{\"status\":\"ok\",\"version\":\"v0.8.2\",\"storage_ok\":true,\"embedding_model_loaded\":true}"}],"isError":false}}
 ```
 
 ---
@@ -247,7 +247,7 @@ Every MCP connection (stdio or HTTP) must follow this sequence:
     },
     "serverInfo": {
       "name": "mnemond",
-      "version": "0.7.0"
+      "version": "0.8.2"
     }
   }
 }
@@ -267,7 +267,7 @@ No response is returned. This is a JSON-RPC notification (no `id` field).
 {"jsonrpc": "2.0", "id": 2, "method": "tools/list"}
 ```
 
-Returns all 35 registered tools with their names, descriptions, and input schemas. Useful for dynamic tool discovery, but not required if you already know the tool names.
+Returns all 38 registered tools with their names, descriptions, and input schemas. Useful for dynamic tool discovery, but not required if you already know the tool names.
 
 ### Step 4: Call tools
 
@@ -812,21 +812,61 @@ Get an entity with its edges and related entities, traversed to a configurable d
 
 ---
 
+#### delete_entity
+
+Delete an entity and cascade to its edges. Removes the entity from the graph,
+FTS index, and vector index, and deletes every edge where the entity is the
+source or target (so no dangling edges remain).
+
+**Arguments:**
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `id` | string | yes | Entity UUID. |
+
+**Request:**
+
+```json
+{
+  "jsonrpc": "2.0", "id": 73,
+  "method": "tools/call",
+  "params": {
+    "name": "delete_entity",
+    "arguments": {"id": "019..."}
+  }
+}
+```
+
+**Response:**
+
+```json
+{
+  "content": [{"type": "text", "text": "{\"deleted\":true}"}],
+  "isError": false
+}
+```
+
+---
+
 ### Temporal Queries
 
 Bi-temporal queries allow you to see how entities changed over time.
 
 #### get_history
 
-Get the version history for an entity.
+Get the version history for an entity -- one entry per recorded mutation
+(`create_entity`, `add_observation`, `extract_events`, consolidation merge),
+ordered ascending by `updated_at`. Each version is an immutable snapshot, so
+`observation_count` shows how the entity grew over time. Entities created before
+versioning was introduced return a single current-state version.
 
 **Arguments:**
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | `entity_id` | string | yes | Entity UUID. |
-| `since` | string | no | ISO 8601 start time filter. |
-| `until` | string | no | ISO 8601 end time filter. |
+| `since` | string | no | ISO 8601 start time filter (on `valid_from`). |
+| `until` | string | no | ISO 8601 end time filter (on `valid_from`). |
 
 **Request:**
 
@@ -845,7 +885,7 @@ Get the version history for an entity.
 
 ```json
 {
-  "content": [{"type": "text", "text": "{\"versions\":[{\"id\":\"019...\",\"name\":\"Auth Service\",\"created_at\":\"2026-04-01T10:00:00Z\",\"updated_at\":\"2026-04-05T14:30:00Z\"}],\"count\":1}"}],
+  "content": [{"type": "text", "text": "{\"versions\":[{\"id\":\"019...\",\"name\":\"Auth Service\",\"created_at\":\"2026-04-01T10:00:00Z\",\"updated_at\":\"2026-04-01T10:00:00Z\",\"observation_count\":1},{\"id\":\"019...\",\"name\":\"Auth Service\",\"created_at\":\"2026-04-01T10:00:00Z\",\"updated_at\":\"2026-04-05T14:30:00Z\",\"observation_count\":3}],\"count\":2}"}],
   "isError": false
 }
 ```
@@ -854,7 +894,10 @@ Get the version history for an entity.
 
 #### get_state_at_time
 
-Get an entity's state as it existed at a specific point in time.
+Reconstruct an entity's state as it existed at a specific point in time --
+returns the immutable snapshot with the greatest `valid_from <= timestamp`. A
+timestamp before the entity was created returns `not found`. Entities created
+before versioning fall back to current state (gated on creation time).
 
 **Arguments:**
 
@@ -1306,6 +1349,70 @@ Find memories eligible for pruning based on age and importance decay. By default
 
 ---
 
+#### link_entities
+
+Connect entities to the memories that mention them by name, creating
+`mentioned_in` edges (entity -> memory). For every entity whose name (>= 3
+chars) appears in a memory's content -- case-insensitive, matched on word
+boundaries -- an edge is created. Idempotent: existing edges are skipped, so it
+is safe to re-run after bulk imports to (re)connect the graph.
+
+**Arguments:** none.
+
+**Request:**
+
+```json
+{
+  "jsonrpc": "2.0", "id": 93,
+  "method": "tools/call",
+  "params": {"name": "link_entities", "arguments": {}}
+}
+```
+
+**Response:**
+
+```json
+{
+  "content": [{"type": "text", "text": "{\"edges_created\":434}"}],
+  "isError": false
+}
+```
+
+---
+
+#### resolve_entities
+
+Merge duplicate entities into one canonical entity. Entities sharing a
+normalized name (lowercased + trimmed) **and** the same `entity_type` are
+merged: observations are appended (deduplicated), edges are re-pointed to the
+canonical entity (both inbound and outbound, so connectivity survives), and the
+duplicates are deleted. The canonical entity is the one with the most
+observations. Different-type entities with the same name are not merged, and
+fuzzy/substring name matching is intentionally avoided. Idempotent.
+
+**Arguments:** none.
+
+**Request:**
+
+```json
+{
+  "jsonrpc": "2.0", "id": 94,
+  "method": "tools/call",
+  "params": {"name": "resolve_entities", "arguments": {}}
+}
+```
+
+**Response:**
+
+```json
+{
+  "content": [{"type": "text", "text": "{\"merged\":1}"}],
+  "isError": false
+}
+```
+
+---
+
 ### Statistics and Monitoring
 
 #### health_check
@@ -1328,7 +1435,7 @@ Check that the daemon is running and storage is accessible.
 
 ```json
 {
-  "content": [{"type": "text", "text": "{\"status\":\"ok\",\"version\":\"v0.7.0\",\"storage_ok\":true,\"embedding_model_loaded\":true}"}],
+  "content": [{"type": "text", "text": "{\"status\":\"ok\",\"version\":\"v0.8.2\",\"storage_ok\":true,\"embedding_model_loaded\":true}"}],
   "isError": false
 }
 ```
@@ -1420,7 +1527,7 @@ Get per-engine statistics for LMDB, FTS5, and the vector index.
 
 #### rebuild_indexes
 
-Rebuild derived indexes (FTS5 and/or vector) from the LMDB source of truth. Use after data corruption or to force re-indexing.
+Rebuild derived indexes (FTS5 and/or vector) from the LMDB source of truth. Use after data corruption or to force re-indexing. The vector rebuild also re-chunks long memories, backfills embeddings for entities that lack them (e.g. created before embed-on-create), and prunes orphan edges whose endpoints no longer exist.
 
 **Arguments:**
 
@@ -1610,7 +1717,7 @@ Always check `isError` before parsing the `text` field as a successful result.
 
 ---
 
-## All 35 Tools at a Glance
+## All 38 Tools at a Glance
 
 | # | Tool | Category | Description |
 |---|------|----------|-------------|
@@ -1649,3 +1756,6 @@ Always check `isError` before parsing the `text` field as a successful result.
 | 33 | `extract_events` | Temporal Events | Parse dates from text, create event entities |
 | 34 | `search_events` | Temporal Events | Search entities by event date range |
 | 35 | `calculate_duration` | Temporal Events | Compute days between two dates |
+| 36 | `delete_entity` | Entity Graph | Delete entity, cascade to its edges |
+| 37 | `link_entities` | Maintenance | Connect entities to memories that mention them |
+| 38 | `resolve_entities` | Maintenance | Merge duplicate entities (name + type) |

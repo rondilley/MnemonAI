@@ -70,6 +70,19 @@ mnemon_err_t mnemon_store_edge(mnemon_storage_t *s,
                                const mnemon_edge_t *e);
 mnemon_err_t mnemon_delete_entity(mnemon_storage_t *s, const uint8_t id[16]);
 
+/* Connect entities to memories that mention them by name ("mentioned_in"
+ * edges). Idempotent. *created receives the number of new edges. */
+mnemon_err_t mnemon_link_entities(mnemon_storage_t *s, size_t *created);
+
+/* Merge entities sharing a normalized name + entity_type into one canonical
+ * entity (most observations wins); appends observations, re-points edges,
+ * deletes duplicates. *merged receives the number removed. */
+mnemon_err_t mnemon_resolve_entities(mnemon_storage_t *s, size_t *merged);
+
+/* Write a creation-time baseline version snapshot for entities that lack one
+ * (predate versioning). Idempotent. *count receives the number written. */
+mnemon_err_t mnemon_backfill_versions(mnemon_storage_t *s, size_t *count);
+
 /* Read operations (thread-safe) */
 mnemon_err_t mnemon_get_memory(mnemon_storage_t *s, const uint8_t id[16],
                                mnemon_memory_t *out);

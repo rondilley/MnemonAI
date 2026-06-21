@@ -32,8 +32,32 @@ mnemon_err_t mnemon_graph_get_entity(mnemon_graph_t *g, MDB_txn *txn,
 mnemon_err_t mnemon_graph_del_entity(mnemon_graph_t *g, MDB_txn *txn,
                                      const uint8_t id[16]);
 
+/* Bi-temporal versioning: write an immutable entity snapshot under version_id
+ * and index it in the temporal DBI by (entity_id, valid_from=updated_at). */
+mnemon_err_t mnemon_graph_put_version(mnemon_graph_t *g, MDB_txn *txn,
+                                      const uint8_t version_id[16],
+                                      const mnemon_entity_t *e);
+/* Load an entity's snapshots with valid_from in [since,until] (0=unbounded),
+ * ascending by valid_from. Caller frees each entity and the array. */
+mnemon_err_t mnemon_graph_load_versions(mnemon_graph_t *g, MDB_txn *txn,
+                                        const uint8_t entity_id[16],
+                                        int64_t since, int64_t until,
+                                        mnemon_entity_t **out, uint32_t *count);
+
+/* Remove temporal entries whose index valid_from differs from the referenced
+ * snapshot's updated_at by more than tol_ms (mis-keyed backfill artifacts).
+ * Deletes the temporal entry and the orphaned snapshot. *pruned = count. */
+mnemon_err_t mnemon_graph_prune_miskeyed_versions(mnemon_graph_t *g,
+                                                  MDB_txn *txn,
+                                                  int64_t tol_ms,
+                                                  size_t *pruned);
+
 mnemon_err_t mnemon_graph_put_edge(mnemon_graph_t *g, MDB_txn *txn,
                                    const mnemon_edge_t *e);
+/* True if an edge source --type--> target already exists (forward index). */
+bool mnemon_graph_edge_exists(mnemon_graph_t *g, MDB_txn *txn,
+                              const uint8_t source[16], const char *type,
+                              const uint8_t target[16]);
 mnemon_err_t mnemon_graph_get_edges_from(mnemon_graph_t *g, MDB_txn *txn,
                                          const uint8_t source_id[16],
                                          const char *edge_type,
